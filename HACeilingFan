@@ -1,50 +1,85 @@
 blueprint:
-  name: Presence-Based Temperature Fan Control
+  name: Presence-Based Temperature Ceiling Fan Control
   description: >
-    Controls a percentage-capable fan based on presence and temperature.
+    Controls a percentage-capable ceiling fan using presence, temperature,
+    thermostat activity, and a selectable operating mode.
 
-    When presence is on:
-    - Below the lower temperature, the fan is off.
-    - At the lower temperature, the fan uses the minimum percentage.
-    - Between the lower and upper temperatures, fan speed increases linearly.
-    - At or above the upper temperature, the fan uses the maximum percentage.
+    Cooling:
+    Uses forward direction and scales fan speed between the selected lower
+    and upper temperatures.
 
-    When presence turns off, the fan remains at its current speed for the
-    selected delay before turning off.
+    Heating:
+    Uses reverse direction at a fixed low speed while the thermostat is
+    actively heating, followed by a selectable circulation delay.
 
-    The temperature source can be a temperature sensor or a climate entity.
-    For a climate entity, the current_temperature attribute is used.
+    Automatic:
+    Selects heating or cooling behavior from the thermostat state and its
+    hvac_action attribute.
+
+    In all modes, the fan turns off after presence has remained off for the
+    selected presence-off delay.
   domain: automation
 
   input:
+    operating_mode:
+      name: Operating mode
+      description: >
+        Automatic follows the thermostat. Cooling always uses the cooling
+        temperature range. Heating always uses active-heating circulation.
+      default: Automatic
+      selector:
+        select:
+          options:
+            - Automatic
+            - Cooling
+            - Heating
+          mode: dropdown
+
     presence_entity:
       name: Presence entity
       description: >
-        Select a binary sensor whose state is "on" when the room is occupied.
+        Select the binary sensor that is on while the room is occupied.
       selector:
         entity:
 
     temperature_entity:
       name: Temperature entity
       description: >
-        Select a temperature sensor or climate entity. Climate entities use
-        their current_temperature attribute.
+        Select a temperature sensor or climate entity. For climate entities,
+        the current_temperature attribute is used.
+      selector:
+        entity:
+
+    thermostat_entity:
+      name: Thermostat entity
+      description: >
+        Select the climate entity used to determine thermostat mode and
+        active heating or cooling.
+      default: climate.t6_front_door
       selector:
         entity:
 
     fan_entity:
       name: Fan entity
       description: >
-        Select a fan entity that supports percentage speed control.
+        Select a percentage-capable fan entity.
       selector:
         entity:
 
-    lower_temperature:
-      name: Lower temperature
+    manage_fan_direction:
+      name: Set fan direction automatically
       description: >
-        Below this temperature the fan is off. At this temperature the fan
-        runs at the minimum percentage. Use the same unit as the temperature
-        entity.
+        Cooling uses forward and heating uses reverse. Disable this if the
+        fan entity does not support fan.set_direction.
+      default: true
+      selector:
+        boolean:
+
+    lower_temperature:
+      name: Lower cooling temperature
+      description: >
+        Below this temperature the fan is off during cooling operation.
+        At this temperature it runs at the minimum cooling percentage.
       default: 72
       selector:
         number:
@@ -54,10 +89,10 @@ blueprint:
           mode: box
 
     upper_temperature:
-      name: Upper temperature
+      name: Upper cooling temperature
       description: >
-        At or above this temperature the fan runs at the maximum percentage.
-        Use the same unit as the temperature entity.
+        At or above this temperature the fan runs at the maximum cooling
+        percentage.
       default: 77
       selector:
         number:
@@ -67,8 +102,8 @@ blueprint:
           mode: box
 
     minimum_percentage:
-      name: Minimum fan percentage
-      description: Fan speed at the lower temperature.
+      name: Minimum cooling percentage
+      description: Cooling speed at the lower temperature.
       default: 20
       selector:
         number:
@@ -79,8 +114,8 @@ blueprint:
           mode: slider
 
     maximum_percentage:
-      name: Maximum fan percentage
-      description: Fan speed at or above the upper temperature.
+      name: Maximum cooling percentage
+      description: Cooling speed at or above the upper temperature.
       default: 100
       selector:
         number:
@@ -90,11 +125,36 @@ blueprint:
           unit_of_measurement: "%"
           mode: slider
 
+    winter_percentage:
+      name: Winter fan percentage
+      description: >
+        Fixed low reverse speed used while the thermostat is actively heating.
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 50
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    heating_run_on_delay:
+      name: Heating run-on delay
+      description: >
+        How long the fan should continue circulating warm air after the
+        thermostat stops actively heating.
+      default:
+        hours: 0
+        minutes: 15
+        seconds: 0
+      selector:
+        duration:
+
     presence_off_delay:
-      name: Fan off delay
+      name: Presence-off delay
       description: >
         How long the fan should remain on after presence changes to off.
-        If presence returns during this period, the shutoff is canceled.
+        Presence returning cancels the pending shutoff.
       default:
         hours: 0
         minutes: 5
@@ -103,33 +163,44 @@ blueprint:
         duration:
 
 variables:
+  operating_mode: !input operating_mode
   presence_entity: !input presence_entity
   temperature_entity: !input temperature_entity
+  thermostat_entity: !input thermostat_entity
+  manage_fan_direction: !input manage_fan_direction
   lower_temperature: !input lower_temperature
   upper_temperature: !input upper_temperature
   minimum_percentage: !input minimum_percentage
   maximum_percentage: !input maximum_percentage
+  winter_percentage: !input winter_percentage
 
 trigger:
-  # Immediately recalculate when presence is detected.
   - platform: state
     entity_id: !input presence_entity
     to: "on"
     id: presence_on
 
-  # Do not trigger until presence has remained off for the selected delay.
   - platform: state
     entity_id: !input presence_entity
     to: "off"
     for: !input presence_off_delay
     id: presence_off_delay_elapsed
 
-  # Recalculate temperature-based speed while the room is occupied.
   - platform: state
     entity_id: !input temperature_entity
     id: temperature_changed
 
-  # Restore the appropriate state after Home Assistant starts.
+  - platform: state
+    entity_id: !input thermostat_entity
+    id: thermostat_changed
+
+  - platform: state
+    entity_id: !input thermostat_entity
+    attribute: hvac_action
+    from: "heating"
+    for: !input heating_run_on_delay
+    id: heating_run_on_elapsed
+
   - platform: homeassistant
     event: start
     id: home_assistant_started
@@ -147,34 +218,159 @@ action:
 
       current_temperature: >-
         {% if temperature_entity.startswith('climate.') %}
-          {{ state_attr(temperature_entity, 'current_temperature') | float(-9999) }}
+          {{
+            state_attr(
+              temperature_entity,
+              'current_temperature'
+            ) | float(-9999)
+          }}
         {% else %}
           {{ states(temperature_entity) | float(-9999) }}
         {% endif %}
 
+      thermostat_mode: >-
+        {{ states(thermostat_entity) }}
+
+      thermostat_action: >-
+        {{
+          state_attr(
+            thermostat_entity,
+            'hvac_action'
+          ) | default('unknown', true)
+        }}
+
+      previous_thermostat_action: >-
+        {% if trigger is defined
+              and trigger.id is defined
+              and trigger.id == 'thermostat_changed'
+              and trigger.from_state is not none %}
+          {{
+            trigger.from_state.attributes.hvac_action
+            | default('unknown', true)
+          }}
+        {% else %}
+          unknown
+        {% endif %}
+
+      thermostat_mode_changed: >-
+        {% if trigger is defined
+              and trigger.id is defined
+              and trigger.id == 'thermostat_changed'
+              and trigger.from_state is not none
+              and trigger.to_state is not none %}
+          {{ trigger.from_state.state != trigger.to_state.state }}
+        {% else %}
+          false
+        {% endif %}
+
+      effective_mode: >-
+        {% set selected = operating_mode | lower %}
+        {% set hvac_mode = states(thermostat_entity) %}
+        {% set hvac_action =
+          state_attr(thermostat_entity, 'hvac_action')
+          | default('unknown', true)
+        %}
+
+        {% if selected == 'cooling' %}
+          cooling
+        {% elif selected == 'heating' %}
+          heating
+        {% elif hvac_action == 'heating' %}
+          heating
+        {% elif hvac_action == 'cooling' %}
+          cooling
+        {% elif hvac_mode == 'heat' %}
+          heating
+        {% elif hvac_mode == 'cool' %}
+          cooling
+        {% else %}
+          idle
+        {% endif %}
+
       range_low: >-
-        {{ [lower_temperature | float(0), upper_temperature | float(0)] | min }}
+        {{
+          [
+            lower_temperature | float(0),
+            upper_temperature | float(0)
+          ] | min
+        }}
 
       range_high: >-
-        {{ [lower_temperature | float(0), upper_temperature | float(0)] | max }}
+        {{
+          [
+            lower_temperature | float(0),
+            upper_temperature | float(0)
+          ] | max
+        }}
 
       speed_low: >-
-        {{ [minimum_percentage | int(1), maximum_percentage | int(100)] | min }}
+        {{
+          [
+            minimum_percentage | int(1),
+            maximum_percentage | int(100)
+          ] | min
+        }}
 
       speed_high: >-
-        {{ [minimum_percentage | int(1), maximum_percentage | int(100)] | max }}
+        {{
+          [
+            minimum_percentage | int(1),
+            maximum_percentage | int(100)
+          ] | max
+        }}
 
   - choose:
-      # Presence is on and the room is warm enough: calculate fan speed.
+      # Presence has remained off for the configured delay.
       - conditions:
           - condition: template
             value_template: >-
               {{
-                is_state(presence_entity, 'on')
-                and (current_temperature | float(-9999)) > -9999
-                and (current_temperature | float(-9999)) >= (range_low | float(0))
+                (trigger_id | trim)
+                == 'presence_off_delay_elapsed'
               }}
         sequence:
+          - service: fan.turn_off
+            target:
+              entity_id: !input fan_entity
+
+      # On startup or manual execution, turn the fan off if vacant.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                (trigger_id | trim)
+                  in ['home_assistant_started', 'manual']
+                and not is_state(presence_entity, 'on')
+              }}
+        sequence:
+          - service: fan.turn_off
+            target:
+              entity_id: !input fan_entity
+
+      # Cooling: occupied and warm enough.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                (effective_mode | trim) == 'cooling'
+                and is_state(presence_entity, 'on')
+                and (current_temperature | float(-9999)) > -9999
+                and (current_temperature | float(-9999))
+                  >= (range_low | float(0))
+              }}
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ manage_fan_direction | bool }}
+                sequence:
+                  - service: fan.set_direction
+                    target:
+                      entity_id: !input fan_entity
+                    data:
+                      direction: forward
+
           - service: fan.set_percentage
             target:
               entity_id: !input fan_entity
@@ -204,27 +400,120 @@ action:
                   }}
                 {% endif %}
 
-      # Presence is on, but the temperature is too low or unavailable.
+      # Cooling: occupied but below the lower temperature, or unavailable.
       - conditions:
           - condition: template
             value_template: >-
-              {{ is_state(presence_entity, 'on') }}
+              {{
+                (effective_mode | trim) == 'cooling'
+                and is_state(presence_entity, 'on')
+              }}
         sequence:
           - service: fan.turn_off
             target:
               entity_id: !input fan_entity
 
-      # Turn off only when the absence delay expires, at startup, or when
-      # manually running the automation while no presence is detected.
+      # Forced Heating mode: turn off if the thermostat is cooling, off,
+      # unavailable, or otherwise not in a heating-capable mode.
       - conditions:
           - condition: template
             value_template: >-
               {{
-                trigger_id | trim in [
-                  'presence_off_delay_elapsed',
-                  'home_assistant_started',
-                  'manual'
-                ]
+                (operating_mode | lower) == 'heating'
+                and (
+                  (thermostat_action | trim) == 'cooling'
+                  or (thermostat_mode | trim)
+                    not in ['heat', 'heat_cool', 'auto']
+                )
+              }}
+        sequence:
+          - service: fan.turn_off
+            target:
+              entity_id: !input fan_entity
+
+      # Heating: occupied and thermostat actively heating.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                (effective_mode | trim) == 'heating'
+                and is_state(presence_entity, 'on')
+                and (thermostat_action | trim) == 'heating'
+              }}
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ manage_fan_direction | bool }}
+                sequence:
+                  - service: fan.set_direction
+                    target:
+                      entity_id: !input fan_entity
+                    data:
+                      direction: reverse
+
+          - service: fan.set_percentage
+            target:
+              entity_id: !input fan_entity
+            data:
+              percentage: >-
+                {{ winter_percentage | int(20) }}
+
+      # Heating has remained inactive for the configured run-on delay.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                (trigger_id | trim) == 'heating_run_on_elapsed'
+                and (operating_mode | lower)
+                  in ['heating', 'automatic']
+              }}
+        sequence:
+          - service: fan.turn_off
+            target:
+              entity_id: !input fan_entity
+
+      # In thermostat auto/heat-cool mode, stop immediately when active
+      # cooling ends. Heating uses the run-on delay instead.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                (operating_mode | lower) == 'automatic'
+                and (effective_mode | trim) == 'idle'
+                and (previous_thermostat_action | trim) == 'cooling'
+              }}
+        sequence:
+          - service: fan.turn_off
+            target:
+              entity_id: !input fan_entity
+
+      # Automatic mode: stop when the thermostat is explicitly changed
+      # to a non-heating/non-cooling mode.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                (operating_mode | lower) == 'automatic'
+                and (effective_mode | trim) == 'idle'
+                and (thermostat_mode_changed | bool)
+              }}
+        sequence:
+          - service: fan.turn_off
+            target:
+              entity_id: !input fan_entity
+
+      # Do not restore a winter fan after restart unless heating is active.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                (trigger_id | trim)
+                  in ['home_assistant_started', 'manual']
+                and (effective_mode | trim)
+                  in ['heating', 'idle']
+                and (thermostat_action | trim) != 'heating'
               }}
         sequence:
           - service: fan.turn_off

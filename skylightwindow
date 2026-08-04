@@ -1,8 +1,8 @@
 blueprint:
   name: Skylight Window — Safe Seasonal Ventilation
   description: >-
-    Manages an operable skylight as a cover. Rain, an unavailable rain sensor,
-    excessive wind, and freezing outdoor temperatures force it closed. When safe,
+    Manages an operable skylight as a cover. Current or forecast rain, unavailable
+    precipitation data, excessive wind, and freezing temperatures force it closed. When safe,
     the skylight opens for free cooling only when outdoor air is useful and the
     HVAC is not actively heating or cooling. A manual-hold helper can pause all
     comfort/efficiency moves while safety closure remains active.
@@ -39,14 +39,17 @@ blueprint:
                 - domain: sensor
                   device_class: temperature
         rain_sensor:
-          name: Rain sensor
+          name: Rain or weather source
           description: >-
-            Must be off when dry and on when rain is detected. Unknown or
-            unavailable is treated as unsafe.
+            Select either a binary sensor (off=dry, on=wet) or a weather entity
+            that supports hourly forecasts. Unknown, unavailable, or a failed
+            hourly forecast is treated as unsafe.
           selector:
             entity:
               filter:
-                - domain: binary_sensor
+                - domain:
+                    - binary_sensor
+                    - weather
 
     optional:
       name: Optional coordination and safety
@@ -101,8 +104,7 @@ blueprint:
       name: Ventilation tuning
       icon: mdi:weather-windy
       description: >-
-        Defaults assume °C. If your sensors report °F, convert every temperature
-        threshold before enabling the automation.
+        All temperature values and differences are in °F.
       input:
         open_position:
           name: Ventilation opening
@@ -114,62 +116,67 @@ blueprint:
               step: 5
               unit_of_measurement: "%"
         indoor_open_temperature:
-          name: Open above indoor temperature
-          description: Uses the same unit as your temperature sensors.
-          default: 24
+          name: Open above indoor temperature (°F)
+          default: 75
           selector:
             number:
-              min: 10
-              max: 40
+              min: 50
+              max: 105
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         indoor_close_temperature:
-          name: Close below indoor temperature
+          name: Close below indoor temperature (°F)
           description: Set lower than the opening threshold to create hysteresis.
-          default: 22.5
+          default: 72.5
           selector:
             number:
-              min: 5
-              max: 40
+              min: 40
+              max: 105
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         required_cooling_delta:
-          name: Minimum indoor-to-outdoor temperature advantage
+          name: Minimum indoor-to-outdoor advantage (°F)
           description: Indoor air must be this much warmer than outdoor air before opening.
-          default: 2
+          default: 3.5
           selector:
             number:
-              min: 0.5
-              max: 10
+              min: 1
+              max: 18
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         close_delta:
-          name: Close when temperature advantage falls below
+          name: Close when temperature advantage falls below (°F)
           description: Set lower than the opening delta to reduce cycling.
-          default: 0.5
+          default: 1
           selector:
             number:
               min: 0
-              max: 9
+              max: 16
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         minimum_venting_temperature:
-          name: Minimum outdoor temperature for ventilation
-          default: 10
+          name: Minimum outdoor ventilation temperature (°F)
+          default: 50
           selector:
             number:
-              min: -20
-              max: 30
+              min: -10
+              max: 90
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         maximum_venting_temperature:
-          name: Maximum outdoor temperature for ventilation
-          default: 28
+          name: Maximum outdoor ventilation temperature (°F)
+          default: 82.5
           selector:
             number:
-              min: 10
-              max: 50
+              min: 50
+              max: 125
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         vent_start_time:
           name: Earliest opening time
@@ -185,17 +192,18 @@ blueprint:
     safety:
       name: Safety limits
       icon: mdi:alert-octagon-outline
-      description: Temperature defaults assume °C; wind uses the sensor's native unit.
+      description: Temperatures are in °F; wind uses the sensor's native unit.
       input:
         freeze_close_temperature:
-          name: Freeze-protection close temperature
+          name: Freeze-protection close temperature (°F)
           description: Outdoor temperature at or below which the skylight is forced closed.
-          default: 2
+          default: 35.5
           selector:
             number:
-              min: -20
-              max: 15
+              min: -10
+              max: 60
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         maximum_wind_speed:
           name: Maximum safe wind speed
@@ -207,6 +215,26 @@ blueprint:
               max: 150
               step: 1
               mode: box
+        forecast_hours:
+          name: Forecast rain look-ahead
+          description: Used only when the rain source is a weather entity.
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 6
+              step: 1
+              unit_of_measurement: h
+        precipitation_probability:
+          name: Forecast precipitation-probability limit
+          description: At or above this value, the skylight remains closed.
+          default: 30
+          selector:
+            number:
+              min: 0
+              max: 100
+              step: 5
+              unit_of_measurement: "%"
 
 triggers:
   - trigger: state
@@ -264,6 +292,8 @@ variables:
   max_vent_temp: !input maximum_venting_temperature
   freeze_temp: !input freeze_close_temperature
   wind_limit: !input maximum_wind_speed
+  rain_forecast_hours: !input forecast_hours
+  rain_probability_limit: !input precipitation_probability
   vent_start: !input vent_start_time
   vent_end: !input vent_end_time
   indoor_raw: "{{ states(indoor_sensor) }}"
@@ -275,7 +305,12 @@ variables:
   hvac_action: "{{ state_attr(climate, 'hvac_action') if climate else none }}"
   current_position: "{{ state_attr(skylight, 'current_position') | int(-1) }}"
   sensors_valid: "{{ indoor is number and outdoor is number }}"
-  rain_safe: "{{ is_state(rain_entity, 'off') }}"
+  rain_source_is_weather: "{{ rain_entity.startswith('weather.') }}"
+  rain_safe: >-
+    {{ is_state(rain_entity, 'off') if not rain_source_is_weather else
+       states(rain_entity) not in
+       ['unknown', 'unavailable', 'rainy', 'pouring', 'lightning-rainy',
+        'snowy', 'snowy-rainy', 'hail', 'lightning', 'exceptional'] }}
   wind_safe: "{{ not wind_entity or (wind is number and wind < wind_limit) }}"
   freeze_safe: "{{ outdoor is number and outdoor > freeze_temp }}"
   safety_close: "{{ not rain_safe or not wind_safe or not freeze_safe }}"
@@ -311,36 +346,101 @@ conditions: []
 
 actions:
   - choose:
-      - alias: Safety always wins
+      - alias: Evaluate current conditions and hourly forecast from a weather entity
         conditions:
           - condition: template
-            value_template: "{{ safety_close and not is_closed }}"
+            value_template: "{{ rain_source_is_weather }}"
         sequence:
-          - action: cover.close_cover
+          - action: weather.get_forecasts
             target:
-              entity_id: "{{ skylight }}"
-
-      - alias: Close when free cooling is no longer useful
-        conditions:
-          - condition: template
-            value_template: "{{ should_energy_close and not is_closed }}"
-        sequence:
-          - action: cover.close_cover
-            target:
-              entity_id: "{{ skylight }}"
-
-      - alias: Open for useful natural cooling
-        conditions:
-          - condition: template
-            value_template: "{{ should_open and not is_at_open_target }}"
-          - condition: and
-            conditions: !input additional_open_conditions
-        sequence:
-          - action: cover.set_cover_position
-            target:
-              entity_id: "{{ skylight }}"
+              entity_id: "{{ rain_entity }}"
             data:
-              position: "{{ target_open_position | int }}"
+              type: hourly
+            response_variable: rain_forecast_response
+            continue_on_error: true
+          - variables:
+              rain_safe: >-
+                {% set wet = ['rainy', 'pouring', 'lightning-rainy', 'snowy',
+                              'snowy-rainy', 'hail', 'lightning', 'exceptional'] %}
+                {% set current_safe = states(rain_entity) not in
+                   ['unknown', 'unavailable', 'rainy', 'pouring', 'lightning-rainy',
+                    'snowy', 'snowy-rainy', 'hail', 'lightning', 'exceptional'] %}
+                {% set entries = rain_forecast_response.get(rain_entity, {}).get('forecast', [])
+                   if rain_forecast_response is defined else [] %}
+                {% set ns = namespace(forecast_wet=false) %}
+                {% for item in entries[:rain_forecast_hours | int] %}
+                  {% if item.get('condition', 'unknown') in wet
+                     or item.get('precipitation_probability', 0) | float(0) >= rain_probability_limit
+                     or item.get('precipitation', 0) | float(0) > 0 %}
+                    {% set ns.forecast_wet = true %}
+                  {% endif %}
+                {% endfor %}
+                {{ current_safe and entries | length > 0 and not ns.forecast_wet }}
+              safety_close: "{{ not rain_safe or not wind_safe or not freeze_safe }}"
+              should_open: >-
+                {{ sensors_valid and automation_allowed and rain_safe and wind_safe and freeze_safe
+                   and hvac_idle and within_hours and indoor >= open_temp
+                   and outdoor >= min_vent_temp and outdoor <= max_vent_temp
+                   and (indoor - outdoor) >= open_delta }}
+          - choose:
+              - alias: Safety always wins
+                conditions:
+                  - condition: template
+                    value_template: "{{ safety_close and not is_closed }}"
+                sequence:
+                  - action: cover.close_cover
+                    target:
+                      entity_id: "{{ skylight }}"
+              - alias: Close when free cooling is no longer useful
+                conditions:
+                  - condition: template
+                    value_template: "{{ should_energy_close and not is_closed }}"
+                sequence:
+                  - action: cover.close_cover
+                    target:
+                      entity_id: "{{ skylight }}"
+              - alias: Open for useful natural cooling
+                conditions:
+                  - condition: template
+                    value_template: "{{ should_open and not is_at_open_target }}"
+                  - condition: and
+                    conditions: !input additional_open_conditions
+                sequence:
+                  - action: cover.set_cover_position
+                    target:
+                      entity_id: "{{ skylight }}"
+                    data:
+                      position: "{{ target_open_position | int }}"
+    default:
+      - choose:
+          - alias: Safety always wins
+            conditions:
+              - condition: template
+                value_template: "{{ safety_close and not is_closed }}"
+            sequence:
+              - action: cover.close_cover
+                target:
+                  entity_id: "{{ skylight }}"
+          - alias: Close when free cooling is no longer useful
+            conditions:
+              - condition: template
+                value_template: "{{ should_energy_close and not is_closed }}"
+            sequence:
+              - action: cover.close_cover
+                target:
+                  entity_id: "{{ skylight }}"
+          - alias: Open for useful natural cooling
+            conditions:
+              - condition: template
+                value_template: "{{ should_open and not is_at_open_target }}"
+              - condition: and
+                conditions: !input additional_open_conditions
+            sequence:
+              - action: cover.set_cover_position
+                target:
+                  entity_id: "{{ skylight }}"
+                data:
+                  position: "{{ target_open_position | int }}"
 
 mode: restart
 max_exceeded: silent

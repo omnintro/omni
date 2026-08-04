@@ -143,45 +143,48 @@ blueprint:
       name: Seasonal thermal thresholds
       icon: mdi:home-thermometer-outline
       description: >-
-        Defaults assume °C. If your sensors report °F, convert every temperature
-        threshold before enabling the automation.
+        All temperature values and differences are in °F.
       input:
         summer_indoor_temperature:
-          name: Indoor cooling threshold
-          default: 24
+          name: Indoor cooling threshold (°F)
+          default: 75
           selector:
             number:
-              min: 10
-              max: 40
+              min: 50
+              max: 105
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         summer_outdoor_temperature:
-          name: Outdoor cooling threshold
-          default: 24
+          name: Outdoor cooling threshold (°F)
+          default: 75
           selector:
             number:
-              min: 10
-              max: 50
+              min: 40
+              max: 125
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         winter_indoor_temperature:
-          name: Indoor heating threshold
-          default: 20
+          name: Indoor heating threshold (°F)
+          default: 68
           selector:
             number:
-              min: 5
-              max: 30
+              min: 40
+              max: 90
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         night_insulation_delta:
-          name: Cold-night indoor-to-outdoor delta
+          name: Cold-night indoor-to-outdoor delta (°F)
           description: Close for insulation when indoors is warmer than outdoors by this amount.
-          default: 4
+          default: 7
           selector:
             number:
-              min: 1
-              max: 20
+              min: 2
+              max: 36
               step: 0.5
+              unit_of_measurement: "°F"
               mode: box
         enable_night_insulation:
           name: Enable cold-night closure

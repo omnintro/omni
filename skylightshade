@@ -1,78 +1,70 @@
 blueprint:
-  name: Skylight Shade — Summer Rejection and Winter Gain
+  name: Skylight Shade — Light, Weather, and Temperature
   description: >-
-    Positions a skylight shade from thermal demand and sunlight. It blocks strong
-    sun when cooling is useful, opens for beneficial winter solar gain, and can
-    close at night to reduce winter heat loss. Solar elevation provides a fallback;
-    an optional irradiance sensor adds cloud-aware hysteresis. Optional wind safety
-    retracts an exterior shade. A manual-hold helper preserves user control.
+    Opens or closes a skylight shade using either an illuminance sensor or the
+    current condition of a weather entity, together with indoor and outdoor
+    temperatures in Fahrenheit. Strong light closes the shade when cooling is
+    needed and opens it when solar gain or daylight is useful. Dim conditions can
+    close the shade for nighttime insulation. Uses only open/close cover actions.
   domain: automation
   author: OpenAI Codex
   homeassistant:
     min_version: 2024.10.0
   input:
-    required:
-      name: Required entities
+    entities:
+      name: Entities
       icon: mdi:roller-shade
       input:
         shade_cover:
           name: Skylight shade
-          description: A shade cover that supports setting its position.
+          description: Any cover entity that supports open and close actions.
           selector:
             entity:
               filter:
                 - domain: cover
-                  supported_features:
-                    - - cover.CoverEntityFeature.SET_POSITION
         indoor_temperature:
-          name: Indoor temperature
+          name: Indoor temperature sensor (°F)
           selector:
             entity:
               filter:
                 - domain: sensor
                   device_class: temperature
         outdoor_temperature:
-          name: Outdoor temperature
+          name: Outdoor temperature sensor (°F)
           selector:
             entity:
               filter:
                 - domain: sensor
                   device_class: temperature
-
-    optional:
-      name: Optional sensors and controls
-      icon: mdi:tune-variant
-      collapsed: true
-      input:
-        solar_irradiance:
-          name: Solar irradiance sensor
-          description: Optional W/m² sensor. Without it, sun elevation is used.
-          default: ""
+        light_or_weather_source:
+          name: Illuminance or current-weather source
+          description: >-
+            Select either an illuminance sensor or a weather entity. Weather
+            entities use their current condition: sunny and partly cloudy count
+            as bright; other known conditions count as dim.
           selector:
             entity:
               filter:
                 - domain: sensor
-                  device_class: irradiance
+                  device_class: illuminance
+                - domain: weather
+
+    optional:
+      name: Optional coordination
+      icon: mdi:tune-variant
+      collapsed: true
+      input:
         climate_entity:
           name: HVAC climate entity
-          description: Optional. Active cooling or heating helps identify current demand.
+          description: Optional; active heating or cooling is included in demand detection.
           default: ""
           selector:
             entity:
               filter:
                 - domain: climate
-        wind_speed:
-          name: Wind-speed sensor for an exterior shade
-          description: Optional. Leave empty for an interior shade.
-          default: ""
-          selector:
-            entity:
-              filter:
-                - domain: sensor
-                  device_class: wind_speed
         automation_enabled:
-          name: Automation enable helper
-          description: Optional input_boolean. Off pauses efficiency moves, not wind retraction.
+          name: Automation-enable helper
+          description: Optional input_boolean; off pauses the automation.
           default: ""
           selector:
             entity:
@@ -80,16 +72,14 @@ blueprint:
                 - domain: input_boolean
         manual_hold:
           name: Manual-hold helper
-          description: >-
-            Optional input_boolean. On preserves the user's chosen shade position
-            unless an exterior-shade wind hazard is active.
+          description: Optional input_boolean; on preserves the manually selected shade state.
           default: ""
           selector:
             entity:
               filter:
                 - domain: input_boolean
         additional_conditions:
-          name: Additional movement conditions
+          name: Additional conditions
           description: Optional occupancy, quiet-hours, or other conditions.
           default:
             - condition: template
@@ -97,57 +87,46 @@ blueprint:
           selector:
             condition:
 
-    positions:
-      name: Shade positions
-      icon: mdi:arrow-expand-vertical
+    light_settings:
+      name: Light settings
+      icon: mdi:brightness-6
       input:
-        summer_heat_position:
-          name: Strong-sun summer position
-          description: 0% is fully closed; 100% is fully open.
-          default: 10
+        bright_lux_threshold:
+          name: Bright threshold
+          description: Shade decisions enter bright mode at or above this value.
+          default: 12000
+          selector:
+            number:
+              min: 100
+              max: 100000
+              step: 100
+              unit_of_measurement: lx
+              mode: box
+        dim_lux_threshold:
+          name: Dim threshold
+          description: Keep below the bright threshold to prevent cycling.
+          default: 6000
           selector:
             number:
               min: 0
-              max: 50
-              step: 5
-              unit_of_measurement: "%"
-        winter_solar_position:
-          name: Winter solar-gain position
-          default: 100
+              max: 99000
+              step: 100
+              unit_of_measurement: lx
+              mode: box
+        close_when_dim:
+          name: Close when dim
+          description: Close after dark or in persistently dim weather.
+          default: true
           selector:
-            number:
-              min: 50
-              max: 100
-              step: 5
-              unit_of_measurement: "%"
-        night_insulation_position:
-          name: Cold-night insulation position
-          default: 0
-          selector:
-            number:
-              min: 0
-              max: 50
-              step: 5
-              unit_of_measurement: "%"
-        neutral_daylight_position:
-          name: Neutral/daylight position
-          default: 100
-          selector:
-            number:
-              min: 25
-              max: 100
-              step: 5
-              unit_of_measurement: "%"
+            boolean:
 
-    thermal:
-      name: Seasonal thermal thresholds
-      icon: mdi:home-thermometer-outline
-      description: >-
-        All temperature values and differences are in °F.
+    temperature_settings:
+      name: Temperature settings — Fahrenheit
+      icon: mdi:thermometer
       input:
-        summer_indoor_temperature:
-          name: Indoor cooling threshold (°F)
-          default: 75
+        cooling_indoor_temperature:
+          name: Indoor cooling threshold
+          default: 76
           selector:
             number:
               min: 50
@@ -155,9 +134,9 @@ blueprint:
               step: 0.5
               unit_of_measurement: "°F"
               mode: box
-        summer_outdoor_temperature:
-          name: Outdoor cooling threshold (°F)
-          default: 75
+        cooling_outdoor_temperature:
+          name: Outdoor cooling threshold
+          default: 78
           selector:
             number:
               min: 40
@@ -165,8 +144,8 @@ blueprint:
               step: 0.5
               unit_of_measurement: "°F"
               mode: box
-        winter_indoor_temperature:
-          name: Indoor heating threshold (°F)
+        heating_indoor_temperature:
+          name: Indoor heating threshold
           default: 68
           selector:
             number:
@@ -175,200 +154,152 @@ blueprint:
               step: 0.5
               unit_of_measurement: "°F"
               mode: box
-        night_insulation_delta:
-          name: Cold-night indoor-to-outdoor delta (°F)
-          description: Close for insulation when indoors is warmer than outdoors by this amount.
-          default: 7
+        cold_outdoor_temperature:
+          name: Cold outdoor threshold
+          default: 45
           selector:
             number:
-              min: 2
-              max: 36
+              min: -20
+              max: 70
+              step: 0.5
+              unit_of_measurement: "°F"
+              mode: box
+        night_insulation_delta:
+          name: Night insulation temperature difference
+          description: Close when indoors is warmer than outdoors by at least this amount.
+          default: 8
+          selector:
+            number:
+              min: 1
+              max: 40
               step: 0.5
               unit_of_measurement: "°F"
               mode: box
         enable_night_insulation:
-          name: Enable cold-night closure
-          description: Best for insulating/cellular shades; disable if condensation is a concern.
+          name: Enable cold-night insulation
+          description: Most useful with insulating or cellular shades.
           default: true
           selector:
             boolean:
 
-    sunlight:
-      name: Sunlight detection
-      icon: mdi:white-balance-sunny
-      input:
-        minimum_sun_elevation:
-          name: Minimum useful sun elevation
-          default: 8
-          selector:
-            number:
-              min: -6
-              max: 45
-              step: 1
-              unit_of_measurement: "°"
-        irradiance_on_threshold:
-          name: Strong-sun irradiance threshold
-          description: Used only when an irradiance sensor is selected.
-          default: 250
-          selector:
-            number:
-              min: 25
-              max: 1000
-              step: 25
-              unit_of_measurement: "W/m²"
-        irradiance_off_threshold:
-          name: Weak-sun irradiance threshold
-          description: Keep below the strong-sun value to avoid shade cycling.
-          default: 150
-          selector:
-            number:
-              min: 0
-              max: 900
-              step: 25
-              unit_of_measurement: "W/m²"
-
-    exterior_safety:
-      name: Exterior-shade wind safety
-      icon: mdi:weather-windy
-      collapsed: true
-      input:
-        maximum_wind_speed:
-          name: Maximum safe wind speed
-          description: Uses the native unit of the selected wind sensor.
-          default: 35
-          selector:
-            number:
-              min: 1
-              max: 150
-              step: 1
-              mode: box
-        wind_safe_position:
-          name: Wind-safe retracted position
-          default: 100
-          selector:
-            number:
-              min: 0
-              max: 100
-              step: 5
-              unit_of_measurement: "%"
-
 triggers:
   - trigger: state
     entity_id: !input indoor_temperature
-    id: evaluate
   - trigger: state
     entity_id: !input outdoor_temperature
-    id: evaluate
   - trigger: state
-    entity_id: sun.sun
-    attribute: elevation
-    id: evaluate
+    entity_id: !input light_or_weather_source
   - trigger: time_pattern
-    minutes: "/10"
-    id: evaluate
+    minutes: "/5"
   - trigger: homeassistant
     event: start
-    id: evaluate
-  - trigger: template
-    value_template: >-
-      {{ wind_entity_trigger != '' and
-         (states(wind_entity_trigger) in ['unknown', 'unavailable'] or
-          states(wind_entity_trigger) | float(-1) >= wind_limit_trigger | float) }}
-    id: wind_safety
-
-trigger_variables:
-  wind_entity_trigger: !input wind_speed
-  wind_limit_trigger: !input maximum_wind_speed
 
 variables:
   shade: !input shade_cover
   indoor_sensor: !input indoor_temperature
   outdoor_sensor: !input outdoor_temperature
-  irradiance_sensor: !input solar_irradiance
+  environment_source: !input light_or_weather_source
   climate: !input climate_entity
-  wind_entity: !input wind_speed
   enabled_helper: !input automation_enabled
   hold_helper: !input manual_hold
-  summer_position: !input summer_heat_position
-  winter_position: !input winter_solar_position
-  night_position: !input night_insulation_position
-  neutral_position: !input neutral_daylight_position
-  summer_indoor: !input summer_indoor_temperature
-  summer_outdoor: !input summer_outdoor_temperature
-  winter_indoor: !input winter_indoor_temperature
-  night_delta: !input night_insulation_delta
+  bright_threshold: !input bright_lux_threshold
+  dim_threshold: !input dim_lux_threshold
+  dim_close_enabled: !input close_when_dim
+  cooling_indoor: !input cooling_indoor_temperature
+  cooling_outdoor: !input cooling_outdoor_temperature
+  heating_indoor: !input heating_indoor_temperature
+  cold_outdoor: !input cold_outdoor_temperature
+  insulation_delta: !input night_insulation_delta
   night_insulation_enabled: !input enable_night_insulation
-  min_sun_elevation: !input minimum_sun_elevation
-  irradiance_on: !input irradiance_on_threshold
-  irradiance_off: !input irradiance_off_threshold
-  wind_limit: !input maximum_wind_speed
-  wind_position: !input wind_safe_position
   indoor: "{{ states(indoor_sensor) | float(none) }}"
   outdoor: "{{ states(outdoor_sensor) | float(none) }}"
-  irradiance: >-
-    {{ states(irradiance_sensor) | float(none) if irradiance_sensor else none }}
-  wind: "{{ states(wind_entity) | float(none) if wind_entity else none }}"
-  sun_elevation: "{{ state_attr('sun.sun', 'elevation') | float(-90) }}"
+  source_state: "{{ states(environment_source) }}"
+  source_is_lux: "{{ environment_source.startswith('sensor.') }}"
+  lux: "{{ source_state | float(none) if source_is_lux else none }}"
+  source_available: "{{ source_state not in ['unknown', 'unavailable', 'none', ''] }}"
+  bright: >-
+    {{ source_available and
+       ((source_is_lux and lux is number and lux >= bright_threshold) or
+        (not source_is_lux and source_state in ['sunny', 'partlycloudy'])) }}
+  dim: >-
+    {{ source_available and
+       ((source_is_lux and lux is number and lux <= dim_threshold) or
+        (not source_is_lux and source_state not in ['sunny', 'partlycloudy'])) }}
   hvac_action: "{{ state_attr(climate, 'hvac_action') if climate else none }}"
-  current_position: "{{ state_attr(shade, 'current_position') | int(-1) }}"
-  sensors_valid: "{{ indoor is number and outdoor is number }}"
+  temperatures_valid: "{{ indoor is number and outdoor is number }}"
+  cooling_needed: >-
+    {{ temperatures_valid and
+       (indoor >= cooling_indoor or outdoor >= cooling_outdoor or hvac_action == 'cooling') }}
+  heating_useful: >-
+    {{ temperatures_valid and
+       (indoor <= heating_indoor or outdoor <= cold_outdoor or hvac_action == 'heating') }}
+  cold_night: >-
+    {{ temperatures_valid and outdoor <= cold_outdoor and
+       (indoor - outdoor) >= insulation_delta }}
   automation_allowed: >-
-    {{ (not enabled_helper or is_state(enabled_helper, 'on'))
-       and (not hold_helper or is_state(hold_helper, 'off')) }}
-  wind_hazard: "{{ wind_entity and (wind is not number or wind >= wind_limit) }}"
-  solar_strong: >-
-    {{ sun_elevation >= min_sun_elevation and
-       (not irradiance_sensor or (irradiance is number and irradiance >= irradiance_on)) }}
-  solar_weak: >-
-    {{ sun_elevation < min_sun_elevation or
-       (irradiance_sensor and (irradiance is not number or irradiance <= irradiance_off)) }}
-  cooling_need: >-
-    {{ sensors_valid and
-       (hvac_action == 'cooling' or indoor >= summer_indoor or outdoor >= summer_outdoor) }}
-  heating_need: >-
-    {{ sensors_valid and (hvac_action == 'heating' or indoor <= winter_indoor) }}
-  cold_outside: "{{ sensors_valid and (indoor - outdoor) >= night_delta }}"
+    {{ (not enabled_helper or is_state(enabled_helper, 'on')) and
+       (not hold_helper or is_state(hold_helper, 'off')) }}
 
-conditions: []
+conditions:
+  - condition: template
+    value_template: "{{ automation_allowed and temperatures_valid and source_available }}"
+  - condition: and
+    conditions: !input additional_conditions
 
 actions:
-  - variables:
-      desired_position: >-
-        {% if wind_hazard %}
-          {{ wind_position | int }}
-        {% elif not automation_allowed %}
-          {{ current_position }}
-        {% elif not sensors_valid %}
-          {{ current_position }}
-        {% elif solar_strong and cooling_need %}
-          {{ summer_position | int }}
-        {% elif solar_strong and heating_need %}
-          {{ winter_position | int }}
-        {% elif solar_strong %}
-          {{ neutral_position | int }}
-        {% elif solar_weak and night_insulation_enabled and cold_outside %}
-          {{ night_position | int }}
-        {% elif solar_weak %}
-          {{ neutral_position | int }}
-        {% else %}
-          {{ current_position }}
-        {% endif %}
-  - if:
-      - condition: template
-        value_template: "{{ not wind_hazard }}"
-    then:
-      - condition: and
-        conditions: !input additional_conditions
-  - condition: template
-    value_template: >-
-      {{ desired_position | int(-1) >= 0 and
-         (current_position < 0 or
-          (current_position - (desired_position | int)) | abs > 2) }}
-  - action: cover.set_cover_position
-    target:
-      entity_id: "{{ shade }}"
-    data:
-      position: "{{ desired_position | int }}"
+  - choose:
+      - alias: Block strong solar gain when cooling is needed
+        conditions:
+          - condition: template
+            value_template: "{{ bright and cooling_needed and not is_state(shade, 'closed') }}"
+        sequence:
+          - action: cover.close_cover
+            target:
+              entity_id: "{{ shade }}"
+
+      - alias: Admit daylight or useful solar heat
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ bright and (heating_useful or not cooling_needed) and
+                 not is_state(shade, 'open') }}
+        sequence:
+          - action: cover.open_cover
+            target:
+              entity_id: "{{ shade }}"
+
+      - alias: Close for cold-night insulation
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ dim and night_insulation_enabled and cold_night and
+                 not is_state(shade, 'closed') }}
+        sequence:
+          - action: cover.close_cover
+            target:
+              entity_id: "{{ shade }}"
+
+      - alias: Apply the selected dim-light preference
+        conditions:
+          - condition: template
+            value_template: "{{ dim }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ dim_close_enabled }}"
+            then:
+              - condition: template
+                value_template: "{{ not is_state(shade, 'closed') }}"
+              - action: cover.close_cover
+                target:
+                  entity_id: "{{ shade }}"
+            else:
+              - condition: template
+                value_template: "{{ not is_state(shade, 'open') }}"
+              - action: cover.open_cover
+                target:
+                  entity_id: "{{ shade }}"
 
 mode: restart
 max_exceeded: silent
+

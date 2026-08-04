@@ -1,0 +1,62 @@
+blueprint:
+  name: Presence-Based Temperature Fan Control
+  description: >
+    Turns a percentage-capable fan off when presence is off or the measured
+    temperature is below the configured range. While presence is on, fan speed
+    scales linearly from the minimum percentage at the lower temperature to the
+    maximum percentage at the upper temperature.
+
+    Supports temperature sensors and climate entities. For climate entities,
+    the current_temperature attribute is used.
+  domain: automation
+  author: OpenAI
+  homeassistant:
+    min_version: 2024.6.0
+
+  input:
+    entity_settings:
+      name: Entities
+      icon: mdi:home-thermometer-outline
+      input:
+        presence_entity:
+          name: Presence entity
+          description: >
+            Select a binary sensor that is on while the room is occupied.
+          selector:
+            entity:
+              filter:
+                - domain: binary_sensor
+
+        temperature_entity:
+          name: Temperature entity
+          description: >
+            Select a temperature sensor, or a climate entity whose
+            current_temperature attribute should be used.
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: temperature
+                - domain: climate
+
+        fan_entity:
+          name: Fan
+          description: Select a fan that supports percentage speed control.
+          selector:
+            entity:
+              filter:
+                - domain: fan
+                  supported_features:
+                    - fan.FanEntityFeature.SET_SPEED
+
+    temperature_settings:
+      name: Temperature range
+      icon: mdi:thermometer-lines
+      input:
+        lower_temperature:
+          name: Lower temperature
+          description: >
+            Below this temperature the fan is off. At this temperature it runs
+            at the minimum percentage. Use the same temperature unit as the
+            selected temperature entity.
+          default: 72

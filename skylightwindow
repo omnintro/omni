@@ -1,0 +1,346 @@
+blueprint:
+  name: Skylight Window — Safe Seasonal Ventilation
+  description: >-
+    Manages an operable skylight as a cover. Rain, an unavailable rain sensor,
+    excessive wind, and freezing outdoor temperatures force it closed. When safe,
+    the skylight opens for free cooling only when outdoor air is useful and the
+    HVAC is not actively heating or cooling. A manual-hold helper can pause all
+    comfort/efficiency moves while safety closure remains active.
+  domain: automation
+  author: OpenAI Codex
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    required:
+      name: Required entities
+      icon: mdi:window-open-variant
+      input:
+        skylight_cover:
+          name: Operable skylight
+          description: A cover entity that supports setting its position.
+          selector:
+            entity:
+              filter:
+                - domain: cover
+                  supported_features:
+                    - cover.CoverEntityFeature.SET_POSITION
+        indoor_temperature:
+          name: Indoor temperature
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: temperature
+        outdoor_temperature:
+          name: Outdoor temperature
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: temperature
+        rain_sensor:
+          name: Rain sensor
+          description: >-
+            Must be off when dry and on when rain is detected. Unknown or
+            unavailable is treated as unsafe.
+          selector:
+            entity:
+              filter:
+                - domain: binary_sensor
+
+    optional:
+      name: Optional coordination and safety
+      icon: mdi:shield-home
+      collapsed: true
+      input:
+        wind_speed:
+          name: Wind-speed sensor
+          description: Optional. Leave empty if unavailable.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: wind_speed
+        climate_entity:
+          name: HVAC climate entity
+          description: >-
+            Optional. Prevents the skylight from opening while HVAC is actively
+            heating or cooling and closes it if HVAC starts.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: climate
+        automation_enabled:
+          name: Automation enable helper
+          description: Optional input_boolean. Off pauses efficiency moves, not safety closure.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        manual_hold:
+          name: Manual-hold helper
+          description: Optional input_boolean. On preserves the user's position unless unsafe.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        additional_open_conditions:
+          name: Additional opening conditions
+          description: Optional occupancy, alarm, air-quality, or other conditions.
+          default:
+            - condition: template
+              value_template: "{{ true }}"
+          selector:
+            condition:
+
+    ventilation:
+      name: Ventilation tuning
+      icon: mdi:weather-windy
+      description: >-
+        Defaults assume °C. If your sensors report °F, convert every temperature
+        threshold before enabling the automation.
+      input:
+        open_position:
+          name: Ventilation opening
+          default: 30
+          selector:
+            number:
+              min: 5
+              max: 100
+              step: 5
+              unit_of_measurement: "%"
+        indoor_open_temperature:
+          name: Open above indoor temperature
+          description: Uses the same unit as your temperature sensors.
+          default: 24
+          selector:
+            number:
+              min: 10
+              max: 40
+              step: 0.5
+              mode: box
+        indoor_close_temperature:
+          name: Close below indoor temperature
+          description: Set lower than the opening threshold to create hysteresis.
+          default: 22.5
+          selector:
+            number:
+              min: 5
+              max: 40
+              step: 0.5
+              mode: box
+        required_cooling_delta:
+          name: Minimum indoor-to-outdoor temperature advantage
+          description: Indoor air must be this much warmer than outdoor air before opening.
+          default: 2
+          selector:
+            number:
+              min: 0.5
+              max: 10
+              step: 0.5
+              mode: box
+        close_delta:
+          name: Close when temperature advantage falls below
+          description: Set lower than the opening delta to reduce cycling.
+          default: 0.5
+          selector:
+            number:
+              min: 0
+              max: 9
+              step: 0.5
+              mode: box
+        minimum_venting_temperature:
+          name: Minimum outdoor temperature for ventilation
+          default: 10
+          selector:
+            number:
+              min: -20
+              max: 30
+              step: 0.5
+              mode: box
+        maximum_venting_temperature:
+          name: Maximum outdoor temperature for ventilation
+          default: 28
+          selector:
+            number:
+              min: 10
+              max: 50
+              step: 0.5
+              mode: box
+        vent_start_time:
+          name: Earliest opening time
+          default: "06:00:00"
+          selector:
+            time:
+        vent_end_time:
+          name: Latest opening time
+          default: "22:00:00"
+          selector:
+            time:
+
+    safety:
+      name: Safety limits
+      icon: mdi:alert-octagon-outline
+      description: Temperature defaults assume °C; wind uses the sensor's native unit.
+      input:
+        freeze_close_temperature:
+          name: Freeze-protection close temperature
+          description: Outdoor temperature at or below which the skylight is forced closed.
+          default: 2
+          selector:
+            number:
+              min: -20
+              max: 15
+              step: 0.5
+              mode: box
+        maximum_wind_speed:
+          name: Maximum safe wind speed
+          description: Uses the native unit of the selected wind sensor.
+          default: 35
+          selector:
+            number:
+              min: 1
+              max: 150
+              step: 1
+              mode: box
+
+triggers:
+  - trigger: state
+    entity_id: !input rain_sensor
+    id: safety
+  - trigger: state
+    entity_id: !input indoor_temperature
+    id: evaluate
+  - trigger: state
+    entity_id: !input outdoor_temperature
+    id: evaluate
+  - trigger: time_pattern
+    minutes: "/5"
+    id: evaluate
+  - trigger: homeassistant
+    event: start
+    id: evaluate
+  - trigger: template
+    value_template: >-
+      {{ wind_entity_trigger != '' and
+         (states(wind_entity_trigger) in ['unknown', 'unavailable'] or
+          states(wind_entity_trigger) | float(-1) >= wind_limit_trigger | float) }}
+    id: safety
+  - trigger: template
+    value_template: >-
+      {{ climate_entity_trigger != '' and
+         state_attr(climate_entity_trigger, 'hvac_action') in ['heating', 'cooling'] }}
+    id: evaluate
+  - trigger: template
+    value_template: >-
+      {{ climate_entity_trigger != '' and
+         state_attr(climate_entity_trigger, 'hvac_action') not in ['heating', 'cooling'] }}
+    id: evaluate
+
+trigger_variables:
+  wind_entity_trigger: !input wind_speed
+  wind_limit_trigger: !input maximum_wind_speed
+  climate_entity_trigger: !input climate_entity
+
+variables:
+  skylight: !input skylight_cover
+  indoor_sensor: !input indoor_temperature
+  outdoor_sensor: !input outdoor_temperature
+  rain_entity: !input rain_sensor
+  wind_entity: !input wind_speed
+  climate: !input climate_entity
+  enabled_helper: !input automation_enabled
+  hold_helper: !input manual_hold
+  target_open_position: !input open_position
+  open_temp: !input indoor_open_temperature
+  close_temp: !input indoor_close_temperature
+  open_delta: !input required_cooling_delta
+  stop_delta: !input close_delta
+  min_vent_temp: !input minimum_venting_temperature
+  max_vent_temp: !input maximum_venting_temperature
+  freeze_temp: !input freeze_close_temperature
+  wind_limit: !input maximum_wind_speed
+  vent_start: !input vent_start_time
+  vent_end: !input vent_end_time
+  indoor_raw: "{{ states(indoor_sensor) }}"
+  outdoor_raw: "{{ states(outdoor_sensor) }}"
+  indoor: "{{ indoor_raw | float(none) }}"
+  outdoor: "{{ outdoor_raw | float(none) }}"
+  wind_raw: "{{ states(wind_entity) if wind_entity else 'unknown' }}"
+  wind: "{{ wind_raw | float(none) }}"
+  hvac_action: "{{ state_attr(climate, 'hvac_action') if climate else none }}"
+  current_position: "{{ state_attr(skylight, 'current_position') | int(-1) }}"
+  sensors_valid: "{{ indoor is number and outdoor is number }}"
+  rain_safe: "{{ is_state(rain_entity, 'off') }}"
+  wind_safe: "{{ not wind_entity or (wind is number and wind < wind_limit) }}"
+  freeze_safe: "{{ outdoor is number and outdoor > freeze_temp }}"
+  safety_close: "{{ not rain_safe or not wind_safe or not freeze_safe }}"
+  automation_allowed: >-
+    {{ (not enabled_helper or is_state(enabled_helper, 'on'))
+       and (not hold_helper or is_state(hold_helper, 'off')) }}
+  hvac_idle: "{{ not climate or hvac_action not in ['heating', 'cooling'] }}"
+  within_hours: >-
+    {% set start = today_at(vent_start) %}
+    {% set end = today_at(vent_end) %}
+    {% if start <= end %}
+      {{ start <= now() <= end }}
+    {% else %}
+      {{ now() >= start or now() <= end }}
+    {% endif %}
+  should_open: >-
+    {{ sensors_valid and automation_allowed and rain_safe and wind_safe and freeze_safe
+       and hvac_idle and within_hours
+       and indoor >= open_temp
+       and outdoor >= min_vent_temp and outdoor <= max_vent_temp
+       and (indoor - outdoor) >= open_delta }}
+  should_energy_close: >-
+    {{ automation_allowed and
+       (not sensors_valid or not within_hours or not hvac_idle
+        or indoor <= close_temp or outdoor < min_vent_temp
+        or outdoor > max_vent_temp or (indoor - outdoor) <= stop_delta) }}
+  is_closed: "{{ is_state(skylight, 'closed') or current_position == 0 }}"
+  is_at_open_target: >-
+    {{ current_position >= 0 and
+       (current_position - (target_open_position | int)) | abs <= 2 }}
+
+conditions: []
+
+actions:
+  - choose:
+      - alias: Safety always wins
+        conditions:
+          - condition: template
+            value_template: "{{ safety_close and not is_closed }}"
+        sequence:
+          - action: cover.close_cover
+            target:
+              entity_id: "{{ skylight }}"
+
+      - alias: Close when free cooling is no longer useful
+        conditions:
+          - condition: template
+            value_template: "{{ should_energy_close and not is_closed }}"
+        sequence:
+          - action: cover.close_cover
+            target:
+              entity_id: "{{ skylight }}"
+
+      - alias: Open for useful natural cooling
+        conditions:
+          - condition: template
+            value_template: "{{ should_open and not is_at_open_target }}"
+          - condition: and
+            conditions: !input additional_open_conditions
+        sequence:
+          - action: cover.set_cover_position
+            target:
+              entity_id: "{{ skylight }}"
+            data:
+              position: "{{ target_open_position | int }}"
+
+mode: restart
+max_exceeded: silent

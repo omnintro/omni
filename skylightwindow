@@ -23,7 +23,7 @@ blueprint:
               filter:
                 - domain: cover
                   supported_features:
-                    - cover.CoverEntityFeature.SET_POSITION
+                    - - cover.CoverEntityFeature.SET_POSITION
         indoor_temperature:
           name: Indoor temperature
           selector:

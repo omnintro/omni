@@ -1,0 +1,672 @@
+blueprint:
+  name: Smart Air Purifier - Air Quality, Comfort, and Energy Saving
+  description: >
+    Controls a percentage-capable air purifier from indoor PM2.5 and presence.
+    Optional cooking, window, sleep, outdoor PM2.5, and temperature entities
+    modify the behavior. Leave optional entity fields blank when unused.
+  domain: automation
+
+  input:
+    operating_mode:
+      name: Operating mode
+      description: Air Quality follows PM2.5; Comfort maintains occupied airflow; Automatic adds airflow only when warm.
+      default: Automatic
+      selector:
+        select:
+          options:
+            - Air Quality
+            - Comfort
+            - Automatic
+          mode: dropdown
+
+    purifier_fan:
+      name: Air purifier fan
+      description: Fan entity that supports percentage control.
+      selector:
+        entity:
+
+    pm25_sensor:
+      name: Indoor PM2.5 sensor
+      selector:
+        entity:
+
+    presence_entity:
+      name: Presence entity
+      description: Binary sensor that is on while the room is occupied.
+      selector:
+        entity:
+
+    clean_pm25:
+      name: Clean PM2.5 threshold
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.5
+          unit_of_measurement: "µg/m³"
+          mode: box
+
+    elevated_pm25:
+      name: Elevated PM2.5 threshold
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 150
+          step: 0.5
+          unit_of_measurement: "µg/m³"
+          mode: box
+
+    high_pm25:
+      name: High PM2.5 threshold
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 250
+          step: 0.5
+          unit_of_measurement: "µg/m³"
+          mode: box
+
+    emergency_pm25:
+      name: Emergency PM2.5 threshold
+      default: 25
+      selector:
+        number:
+          min: 1
+          max: 500
+          step: 0.5
+          unit_of_measurement: "µg/m³"
+          mode: box
+
+    occupied_clean_speed:
+      name: Occupied clean-air speed
+      description: Baseline occupied speed when PM2.5 is clean. Set to 0 to turn off.
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    occupied_maximum_speed:
+      name: Occupied maximum speed
+      description: Normal occupied speed at the high threshold.
+      default: 70
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    vacant_cleaning_speed:
+      name: Vacant cleaning speed
+      description: Minimum cleanup speed while vacant and PM2.5 is not clean.
+      default: 85
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    emergency_speed:
+      name: Emergency speed
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    clean_air_shutoff_delay:
+      name: Vacant clean-air shutoff delay
+      description: The room must remain vacant and clean for this long before shutoff.
+      default:
+        hours: 0
+        minutes: 20
+        seconds: 0
+      selector:
+        duration:
+
+    minimum_runtime:
+      name: Minimum purifier runtime
+      description: Minimum runtime before a normal vacant clean-air shutoff.
+      default:
+        hours: 0
+        minutes: 10
+        seconds: 0
+      selector:
+        duration:
+
+    speed_change_delay:
+      name: Minimum time between speed reductions
+      description: Speed increases are immediate; ordinary reductions wait this long.
+      default:
+        hours: 0
+        minutes: 3
+        seconds: 0
+      selector:
+        duration:
+
+    cooking_entity:
+      name: Cooking or pollution-event entity (optional)
+      description: Binary sensor or helper that is on during cooking, vacuuming, candles, or similar events.
+      default: ""
+      selector:
+        entity:
+
+    cooking_boost_speed:
+      name: Cooking or pollution-event boost speed
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    cooking_run_on_delay:
+      name: Cooking or pollution-event run-on
+      default:
+        hours: 0
+        minutes: 30
+        seconds: 0
+      selector:
+        duration:
+
+    window_entity:
+      name: Window or exterior-door group (optional)
+      description: Binary sensor or group that is on while open.
+      default: ""
+      selector:
+        entity:
+
+    window_behavior:
+      name: Open-window behavior
+      default: Turn off unless emergency
+      selector:
+        select:
+          options:
+            - Ignore
+            - Turn off unless emergency
+            - Always turn off
+          mode: dropdown
+
+    sleep_entity:
+      name: Sleep-mode entity (optional)
+      description: Binary sensor or helper that is on during sleep or quiet hours.
+      default: ""
+      selector:
+        entity:
+
+    sleep_counts_as_presence:
+      name: Sleep counts as presence
+      description: Prevent vacancy shutoff while sleep mode is active.
+      default: true
+      selector:
+        boolean:
+
+    sleep_maximum_speed:
+      name: Sleep maximum speed
+      description: Normal speed cap during sleep; emergency and event boosts bypass it.
+      default: 40
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    outdoor_pm25_sensor:
+      name: Outdoor PM2.5 sensor (optional)
+      default: ""
+      selector:
+        entity:
+
+    outdoor_bad_threshold:
+      name: Bad outdoor PM2.5 threshold
+      default: 35
+      selector:
+        number:
+          min: 1
+          max: 500
+          step: 0.5
+          unit_of_measurement: "µg/m³"
+          mode: box
+
+    outdoor_smoke_minimum_speed:
+      name: Outdoor-smoke minimum speed
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    temperature_entity:
+      name: Temperature entity (optional)
+      description: Temperature sensor or climate entity. Climate entities use current_temperature.
+      default: ""
+      selector:
+        entity:
+
+    warm_temperature:
+      name: Warm-room threshold
+      default: 76
+      selector:
+        number:
+          min: -50
+          max: 150
+          step: 0.5
+          mode: box
+
+    warm_comfort_speed:
+      name: Comfort or warm-room minimum speed
+      description: Minimum occupied speed in Comfort mode, or in Automatic mode when warm.
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    unavailable_pm25_behavior:
+      name: PM2.5 sensor unavailable behavior
+      default: Keep current state
+      selector:
+        select:
+          options:
+            - Keep current state
+            - Run safety speed
+            - Turn off
+          mode: dropdown
+
+    unavailable_safety_speed:
+      name: PM2.5-unavailable safety speed
+      default: 40
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+trigger_variables:
+  _presence: !input presence_entity
+  _pm25: !input pm25_sensor
+  _clean: !input clean_pm25
+  _elevated: !input elevated_pm25
+  _high: !input high_pm25
+  _emergency: !input emergency_pm25
+  _cooking: !input cooking_entity
+  _cooking_run_on: !input cooking_run_on_delay
+  _sleep: !input sleep_entity
+  _sleep_is_presence: !input sleep_counts_as_presence
+  _outdoor: !input outdoor_pm25_sensor
+  _outdoor_bad: !input outdoor_bad_threshold
+  _window: !input window_entity
+  _temperature: !input temperature_entity
+  _warm: !input warm_temperature
+
+variables:
+  operating_mode: !input operating_mode
+  purifier_fan: !input purifier_fan
+  pm25_sensor: !input pm25_sensor
+  presence_entity: !input presence_entity
+  clean_pm25: !input clean_pm25
+  elevated_pm25: !input elevated_pm25
+  high_pm25: !input high_pm25
+  emergency_pm25: !input emergency_pm25
+  occupied_clean_speed: !input occupied_clean_speed
+  occupied_maximum_speed: !input occupied_maximum_speed
+  vacant_cleaning_speed: !input vacant_cleaning_speed
+  emergency_speed: !input emergency_speed
+  minimum_runtime: !input minimum_runtime
+  speed_change_delay: !input speed_change_delay
+  cooking_entity: !input cooking_entity
+  cooking_boost_speed: !input cooking_boost_speed
+  cooking_run_on_delay: !input cooking_run_on_delay
+  window_entity: !input window_entity
+  window_behavior: !input window_behavior
+  sleep_entity: !input sleep_entity
+  sleep_counts_as_presence: !input sleep_counts_as_presence
+  sleep_maximum_speed: !input sleep_maximum_speed
+  outdoor_pm25_sensor: !input outdoor_pm25_sensor
+  outdoor_bad_threshold: !input outdoor_bad_threshold
+  outdoor_smoke_minimum_speed: !input outdoor_smoke_minimum_speed
+  temperature_entity: !input temperature_entity
+  warm_temperature: !input warm_temperature
+  warm_comfort_speed: !input warm_comfort_speed
+  unavailable_pm25_behavior: !input unavailable_pm25_behavior
+  unavailable_safety_speed: !input unavailable_safety_speed
+
+trigger:
+  - platform: state
+    entity_id: !input pm25_sensor
+    id: pm25_changed
+
+  - platform: state
+    entity_id: !input presence_entity
+    id: presence_changed
+
+  - platform: time_pattern
+    minutes: "/1"
+    id: periodic_update
+
+  - platform: homeassistant
+    event: start
+    id: home_assistant_started
+
+  - platform: template
+    value_template: >-
+      {% set limits = [_clean|float(0), _elevated|float(0),
+        _high|float(0), _emergency|float(0)] | sort %}
+      {% set pm_state = states(_pm25) %}
+      {% set pm_valid = pm_state not in ['unknown','unavailable','none','']
+        and (pm_state|float(99999)) < 99999 %}
+      {% set sleep_on = _sleep != '' and is_state(_sleep, 'on') %}
+      {% set occupied = is_state(_presence, 'on')
+        or ((_sleep_is_presence|bool) and sleep_on) %}
+      {% set run_on = ((_cooking_run_on.hours|default(0)|int)*3600)
+        + ((_cooking_run_on.minutes|default(0)|int)*60)
+        + (_cooking_run_on.seconds|default(0)|int) %}
+      {% set cooking_on = _cooking != '' and is_state(_cooking, 'on') %}
+      {% set cooking_recent = _cooking != ''
+        and states(_cooking) == 'off' and run_on > 0
+        and (as_timestamp(now())
+          - as_timestamp(states[_cooking].last_changed, 0)) < run_on %}
+      {% set outdoor_bad = _outdoor != ''
+        and states(_outdoor) not in ['unknown','unavailable','none','']
+        and (states(_outdoor)|float(-1)) >= (_outdoor_bad|float(35)) %}
+      {{ pm_valid and (pm_state|float(99999)) < limits[0]
+        and not occupied and not cooking_on and not cooking_recent
+        and not outdoor_bad }}
+    for: !input clean_air_shutoff_delay
+    id: clean_vacant_elapsed
+
+  - platform: template
+    value_template: "{{ _cooking != '' and is_state(_cooking, 'on') }}"
+    id: cooking_started
+
+  - platform: template
+    value_template: "{{ _window != '' and is_state(_window, 'on') }}"
+    id: window_opened
+
+  - platform: template
+    value_template: "{{ _window != '' and not is_state(_window, 'on') }}"
+    id: window_closed
+
+  - platform: template
+    value_template: "{{ _sleep != '' and is_state(_sleep, 'on') }}"
+    id: sleep_started
+
+  - platform: template
+    value_template: >-
+      {{ _outdoor != ''
+        and states(_outdoor) not in ['unknown','unavailable','none','']
+        and (states(_outdoor)|float(-1)) >= (_outdoor_bad|float(35)) }}
+    id: outdoor_became_bad
+
+  - platform: template
+    value_template: >-
+      {{ _temperature != '' and (
+        state_attr(_temperature, 'current_temperature')
+        if _temperature.startswith('climate.') else states(_temperature)
+        )|float(-9999) >= (_warm|float(76)) }}
+    id: room_became_warm
+
+condition: []
+
+action:
+  - variables:
+      trigger_id: >-
+        {{ trigger.id if trigger is defined and trigger.id is defined else 'manual' }}
+      minimum_runtime_seconds: >-
+        {{ ((minimum_runtime.hours|default(0)|int)*3600)
+          + ((minimum_runtime.minutes|default(0)|int)*60)
+          + (minimum_runtime.seconds|default(0)|int) }}
+      speed_change_seconds: >-
+        {{ ((speed_change_delay.hours|default(0)|int)*3600)
+          + ((speed_change_delay.minutes|default(0)|int)*60)
+          + (speed_change_delay.seconds|default(0)|int) }}
+      cooking_run_on_seconds: >-
+        {{ ((cooking_run_on_delay.hours|default(0)|int)*3600)
+          + ((cooking_run_on_delay.minutes|default(0)|int)*60)
+          + (cooking_run_on_delay.seconds|default(0)|int) }}
+
+  - variables:
+      pm25_valid: >-
+        {{ states(pm25_sensor) not in ['unknown','unavailable','none','']
+          and (states(pm25_sensor)|float(99999)) < 99999 }}
+      pm25_value: "{{ states(pm25_sensor)|float(99999) }}"
+      sleep_active: "{{ sleep_entity != '' and is_state(sleep_entity, 'on') }}"
+      cooking_run_on_active: >-
+        {% if cooking_entity != '' and is_state(cooking_entity, 'on') %}
+          true
+        {% elif cooking_entity != '' and states(cooking_entity) == 'off'
+              and (cooking_run_on_seconds|int(0)) > 0 %}
+          {{ (as_timestamp(now())
+            - as_timestamp(states[cooking_entity].last_changed, 0))
+            < (cooking_run_on_seconds|int(0)) }}
+        {% else %}
+          false
+        {% endif %}
+      window_open: "{{ window_entity != '' and is_state(window_entity, 'on') }}"
+      outdoor_bad: >-
+        {{ outdoor_pm25_sensor != ''
+          and states(outdoor_pm25_sensor) not in ['unknown','unavailable','none','']
+          and (states(outdoor_pm25_sensor)|float(-1))
+            >= (outdoor_bad_threshold|float(35)) }}
+      current_temperature: >-
+        {% if temperature_entity == '' %}-9999
+        {% elif temperature_entity.startswith('climate.') %}
+          {{ state_attr(temperature_entity, 'current_temperature')|float(-9999) }}
+        {% else %}{{ states(temperature_entity)|float(-9999) }}{% endif %}
+      fan_is_on: "{{ is_state(purifier_fan, 'on') }}"
+      current_percentage: "{{ state_attr(purifier_fan, 'percentage')|int(0) }}"
+      fan_on_seconds: >-
+        {% if is_state(purifier_fan, 'on') %}
+          {{ as_timestamp(now()) - as_timestamp(states[purifier_fan].last_changed, 0) }}
+        {% else %}999999{% endif %}
+      fan_update_seconds: >-
+        {{ as_timestamp(now()) - as_timestamp(states[purifier_fan].last_updated, 0) }}
+
+  - variables:
+      occupied_effective: >-
+        {{ is_state(presence_entity, 'on')
+          or ((sleep_counts_as_presence|bool) and (sleep_active|bool)) }}
+      room_is_warm: >-
+        {{ temperature_entity != '' and (current_temperature|float(-9999))
+          >= (warm_temperature|float(76)) }}
+      target_percentage: >-
+        {% set limits = [clean_pm25|float(0), elevated_pm25|float(0),
+          high_pm25|float(0), emergency_pm25|float(0)] | sort %}
+        {% set clean = limits[0] %}
+        {% set elevated = limits[1] %}
+        {% set high = limits[2] %}
+        {% set emergency = limits[3] %}
+        {% set low_speed = [[occupied_clean_speed|int(0),0]|max,100]|min %}
+        {% set max_speed = [[occupied_maximum_speed|int(70),0]|max,100]|min %}
+        {% set vacant_speed = [[vacant_cleaning_speed|int(85),0]|max,100]|min %}
+        {% set emergency_fan = [[emergency_speed|int(100),0]|max,100]|min %}
+        {% set event_speed = [[cooking_boost_speed|int(100),0]|max,100]|min %}
+        {% set outdoor_speed = [[outdoor_smoke_minimum_speed|int(50),0]|max,100]|min %}
+        {% set comfort_speed = [[warm_comfort_speed|int(30),0]|max,100]|min %}
+        {% set sleep_cap = [[sleep_maximum_speed|int(40),0]|max,100]|min %}
+        {% set safety_speed = [[unavailable_safety_speed|int(40),0]|max,100]|min %}
+        {% set pm = pm25_value|float(99999) %}
+        {% set indoor_emergency = (pm25_valid|bool) and pm >= emergency %}
+        {% set emergency_override = (cooking_run_on_active|bool)
+          or (outdoor_bad|bool) or indoor_emergency %}
+        {% set ns = namespace(target=-1) %}
+
+        {% if (window_open|bool) and window_behavior == 'Always turn off' %}
+          {% set ns.target = 0 %}
+        {% elif (window_open|bool)
+              and window_behavior == 'Turn off unless emergency'
+              and not emergency_override %}
+          {% set ns.target = 0 %}
+        {% elif cooking_run_on_active|bool %}
+          {% set ns.target = event_speed %}
+        {% elif outdoor_bad|bool and not (pm25_valid|bool) %}
+          {% set ns.target = outdoor_speed %}
+        {% elif not (pm25_valid|bool) %}
+          {% if unavailable_pm25_behavior == 'Run safety speed' %}
+            {% set ns.target = safety_speed %}
+          {% elif unavailable_pm25_behavior == 'Turn off' %}
+            {% set ns.target = 0 %}
+          {% endif %}
+        {% elif indoor_emergency %}
+          {% set ns.target = emergency_fan %}
+        {% else %}
+          {# Piecewise-linear occupied speed through the four thresholds. #}
+          {% if pm < clean %}
+            {% set normal = low_speed %}
+          {% elif pm < elevated and elevated > clean %}
+            {% set mid = low_speed + ((max_speed-low_speed)*0.4) %}
+            {% set normal = low_speed
+              + ((pm-clean)/(elevated-clean))*(mid-low_speed) %}
+          {% elif pm < high and high > elevated %}
+            {% set mid = low_speed + ((max_speed-low_speed)*0.4) %}
+            {% set normal = mid
+              + ((pm-elevated)/(high-elevated))*(max_speed-mid) %}
+          {% else %}
+            {% set normal = max_speed %}
+          {% endif %}
+          {% set normal = normal|round(0)|int %}
+
+          {% if occupied_effective|bool %}
+            {% set ns.target = normal %}
+            {% if operating_mode == 'Comfort' %}
+              {% set ns.target = [ns.target, comfort_speed]|max %}
+            {% elif operating_mode == 'Automatic' and (room_is_warm|bool) %}
+              {% set ns.target = [ns.target, comfort_speed]|max %}
+            {% endif %}
+            {% if outdoor_bad|bool %}
+              {% set ns.target = [ns.target, outdoor_speed]|max %}
+            {% endif %}
+          {% elif pm < clean and not (outdoor_bad|bool) %}
+            {% if (trigger_id|trim) in
+                ['clean_vacant_elapsed','home_assistant_started','manual']
+                or not (fan_is_on|bool) %}
+              {% set ns.target = 0 %}
+            {% endif %}
+          {% else %}
+            {% set ns.target = [normal, vacant_speed]|max %}
+            {% if outdoor_bad|bool %}
+              {% set ns.target = [ns.target, outdoor_speed]|max %}
+            {% endif %}
+          {% endif %}
+        {% endif %}
+
+        {% if (sleep_active|bool) and (occupied_effective|bool)
+              and ns.target > 0 and not emergency_override %}
+          {% set ns.target = [ns.target, sleep_cap]|min %}
+        {% endif %}
+        {{ [[ns.target|int(-1),-1]|max,100]|min }}
+
+  - variables:
+      clean_vacant_shutdown: >-
+        {% set limits = [clean_pm25|float(0), elevated_pm25|float(0),
+          high_pm25|float(0), emergency_pm25|float(0)] | sort %}
+        {{ (target_percentage|int(-1)) == 0
+          and not (occupied_effective|bool) and (pm25_valid|bool)
+          and (pm25_value|float(99999)) < limits[0]
+          and not (cooking_run_on_active|bool) and not (outdoor_bad|bool) }}
+      speed_change_allowed: >-
+        {{ not (fan_is_on|bool)
+          or (target_percentage|int(-1)) > (current_percentage|int(0))
+          or (fan_update_seconds|float(0)) >= (speed_change_seconds|int(0))
+          or (trigger_id|trim) in ['presence_changed','cooking_started',
+            'window_opened','window_closed','sleep_started',
+            'outdoor_became_bad','room_became_warm',
+            'home_assistant_started','manual'] }}
+
+  - condition: template
+    value_template: "{{ (target_percentage|int(-1)) >= 0 }}"
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ (target_percentage|int(-1)) == 0 }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ (clean_vacant_shutdown|bool) and (fan_is_on|bool)
+                        and (fan_on_seconds|float(0))
+                          < (minimum_runtime_seconds|int(0)) }}
+                sequence:
+                  - delay:
+                      seconds: >-
+                        {{ [(minimum_runtime_seconds|int(0))
+                          - (fan_on_seconds|float(0)),0]|max|round(0)|int }}
+                  - condition: template
+                    value_template: >-
+                      {% set limits = [clean_pm25|float(0),
+                        elevated_pm25|float(0), high_pm25|float(0),
+                        emergency_pm25|float(0)] | sort %}
+                      {% set sleep_now = sleep_entity != ''
+                        and is_state(sleep_entity, 'on') %}
+                      {% set occupied_now = is_state(presence_entity, 'on')
+                        or ((sleep_counts_as_presence|bool) and sleep_now) %}
+                      {% set cooking_now = cooking_entity != ''
+                        and is_state(cooking_entity, 'on') %}
+                      {% set cooking_recent = cooking_entity != ''
+                        and states(cooking_entity) == 'off'
+                        and (cooking_run_on_seconds|int(0)) > 0
+                        and (as_timestamp(now())
+                          - as_timestamp(states[cooking_entity].last_changed, 0))
+                          < (cooking_run_on_seconds|int(0)) %}
+                      {% set outdoor_now = outdoor_pm25_sensor != ''
+                        and states(outdoor_pm25_sensor)
+                          not in ['unknown','unavailable','none','']
+                        and (states(outdoor_pm25_sensor)|float(-1))
+                          >= (outdoor_bad_threshold|float(35)) %}
+                      {{ not occupied_now and states(pm25_sensor)
+                        not in ['unknown','unavailable','none','']
+                        and (states(pm25_sensor)|float(99999)) < limits[0]
+                        and not cooking_now and not cooking_recent
+                        and not outdoor_now }}
+                  - service: fan.turn_off
+                    target:
+                      entity_id: !input purifier_fan
+            default:
+              - service: fan.turn_off
+                target:
+                  entity_id: !input purifier_fan
+
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ (target_percentage|int(-1)) > 0
+                and (not (fan_is_on|bool)
+                  or (current_percentage|int(0)) != (target_percentage|int(0)))
+                and (speed_change_allowed|bool) }}
+        sequence:
+          - service: fan.set_percentage
+            target:
+              entity_id: !input purifier_fan
+            data:
+              percentage: "{{ target_percentage|int(0) }}"
+
+mode: parallel
+max: 10
+max_exceeded: silent

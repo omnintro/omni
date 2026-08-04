@@ -3,13 +3,14 @@ blueprint:
   description: >
     Controls a percentage-capable fan based on presence and temperature.
 
-    When presence is off, the fan turns off.
-
     When presence is on:
     - Below the lower temperature, the fan is off.
     - At the lower temperature, the fan uses the minimum percentage.
-    - Between the lower and upper temperatures, the fan speed increases linearly.
+    - Between the lower and upper temperatures, fan speed increases linearly.
     - At or above the upper temperature, the fan uses the maximum percentage.
+
+    When presence turns off, the fan remains at its current speed for the
+    selected delay before turning off.
 
     The temperature source can be a temperature sensor or a climate entity.
     For a climate entity, the current_temperature attribute is used.
@@ -89,6 +90,18 @@ blueprint:
           unit_of_measurement: "%"
           mode: slider
 
+    presence_off_delay:
+      name: Fan off delay
+      description: >
+        How long the fan should remain on after presence changes to off.
+        If presence returns during this period, the shutoff is canceled.
+      default:
+        hours: 0
+        minutes: 5
+        seconds: 0
+      selector:
+        duration:
+
 variables:
   presence_entity: !input presence_entity
   temperature_entity: !input temperature_entity
@@ -98,19 +111,40 @@ variables:
   maximum_percentage: !input maximum_percentage
 
 trigger:
+  # Immediately recalculate when presence is detected.
   - platform: state
     entity_id: !input presence_entity
+    to: "on"
+    id: presence_on
 
+  # Do not trigger until presence has remained off for the selected delay.
+  - platform: state
+    entity_id: !input presence_entity
+    to: "off"
+    for: !input presence_off_delay
+    id: presence_off_delay_elapsed
+
+  # Recalculate temperature-based speed while the room is occupied.
   - platform: state
     entity_id: !input temperature_entity
+    id: temperature_changed
 
+  # Restore the appropriate state after Home Assistant starts.
   - platform: homeassistant
     event: start
+    id: home_assistant_started
 
 condition: []
 
 action:
   - variables:
+      trigger_id: >-
+        {% if trigger is defined and trigger.id is defined %}
+          {{ trigger.id }}
+        {% else %}
+          manual
+        {% endif %}
+
       current_temperature: >-
         {% if temperature_entity.startswith('climate.') %}
           {{ state_attr(temperature_entity, 'current_temperature') | float(-9999) }}
@@ -131,6 +165,7 @@ action:
         {{ [minimum_percentage | int(1), maximum_percentage | int(100)] | max }}
 
   - choose:
+      # Presence is on and the room is warm enough: calculate fan speed.
       - conditions:
           - condition: template
             value_template: >-
@@ -139,7 +174,6 @@ action:
                 and (current_temperature | float(-9999)) > -9999
                 and (current_temperature | float(-9999)) >= (range_low | float(0))
               }}
-
         sequence:
           - service: fan.set_percentage
             target:
@@ -170,10 +204,32 @@ action:
                   }}
                 {% endif %}
 
-    default:
-      - service: fan.turn_off
-        target:
-          entity_id: !input fan_entity
+      # Presence is on, but the temperature is too low or unavailable.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ is_state(presence_entity, 'on') }}
+        sequence:
+          - service: fan.turn_off
+            target:
+              entity_id: !input fan_entity
+
+      # Turn off only when the absence delay expires, at startup, or when
+      # manually running the automation while no presence is detected.
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                trigger_id | trim in [
+                  'presence_off_delay_elapsed',
+                  'home_assistant_started',
+                  'manual'
+                ]
+              }}
+        sequence:
+          - service: fan.turn_off
+            target:
+              entity_id: !input fan_entity
 
 mode: restart
 max_exceeded: silent

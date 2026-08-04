@@ -1,0 +1,179 @@
+blueprint:
+  name: Presence-Based Temperature Fan Control
+  description: >
+    Controls a percentage-capable fan based on presence and temperature.
+
+    When presence is off, the fan turns off.
+
+    When presence is on:
+    - Below the lower temperature, the fan is off.
+    - At the lower temperature, the fan uses the minimum percentage.
+    - Between the lower and upper temperatures, the fan speed increases linearly.
+    - At or above the upper temperature, the fan uses the maximum percentage.
+
+    The temperature source can be a temperature sensor or a climate entity.
+    For a climate entity, the current_temperature attribute is used.
+  domain: automation
+
+  input:
+    presence_entity:
+      name: Presence entity
+      description: >
+        Select a binary sensor whose state is "on" when the room is occupied.
+      selector:
+        entity:
+
+    temperature_entity:
+      name: Temperature entity
+      description: >
+        Select a temperature sensor or climate entity. Climate entities use
+        their current_temperature attribute.
+      selector:
+        entity:
+
+    fan_entity:
+      name: Fan entity
+      description: >
+        Select a fan entity that supports percentage speed control.
+      selector:
+        entity:
+
+    lower_temperature:
+      name: Lower temperature
+      description: >
+        Below this temperature the fan is off. At this temperature the fan
+        runs at the minimum percentage. Use the same unit as the temperature
+        entity.
+      default: 72
+      selector:
+        number:
+          min: -50
+          max: 150
+          step: 0.5
+          mode: box
+
+    upper_temperature:
+      name: Upper temperature
+      description: >
+        At or above this temperature the fan runs at the maximum percentage.
+        Use the same unit as the temperature entity.
+      default: 77
+      selector:
+        number:
+          min: -50
+          max: 150
+          step: 0.5
+          mode: box
+
+    minimum_percentage:
+      name: Minimum fan percentage
+      description: Fan speed at the lower temperature.
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    maximum_percentage:
+      name: Maximum fan percentage
+      description: Fan speed at or above the upper temperature.
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+variables:
+  presence_entity: !input presence_entity
+  temperature_entity: !input temperature_entity
+  lower_temperature: !input lower_temperature
+  upper_temperature: !input upper_temperature
+  minimum_percentage: !input minimum_percentage
+  maximum_percentage: !input maximum_percentage
+
+trigger:
+  - platform: state
+    entity_id: !input presence_entity
+
+  - platform: state
+    entity_id: !input temperature_entity
+
+  - platform: homeassistant
+    event: start
+
+condition: []
+
+action:
+  - variables:
+      current_temperature: >-
+        {% if temperature_entity.startswith('climate.') %}
+          {{ state_attr(temperature_entity, 'current_temperature') | float(-9999) }}
+        {% else %}
+          {{ states(temperature_entity) | float(-9999) }}
+        {% endif %}
+
+      range_low: >-
+        {{ [lower_temperature | float(0), upper_temperature | float(0)] | min }}
+
+      range_high: >-
+        {{ [lower_temperature | float(0), upper_temperature | float(0)] | max }}
+
+      speed_low: >-
+        {{ [minimum_percentage | int(1), maximum_percentage | int(100)] | min }}
+
+      speed_high: >-
+        {{ [minimum_percentage | int(1), maximum_percentage | int(100)] | max }}
+
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{
+                is_state(presence_entity, 'on')
+                and (current_temperature | float(-9999)) > -9999
+                and (current_temperature | float(-9999)) >= (range_low | float(0))
+              }}
+
+        sequence:
+          - service: fan.set_percentage
+            target:
+              entity_id: !input fan_entity
+            data:
+              percentage: >-
+                {% set temp = current_temperature | float(-9999) %}
+                {% set low = range_low | float(0) %}
+                {% set high = range_high | float(0) %}
+                {% set min_speed = speed_low | int(1) %}
+                {% set max_speed = speed_high | int(100) %}
+
+                {% if high <= low %}
+                  {{ max_speed }}
+                {% elif temp >= high %}
+                  {{ max_speed }}
+                {% elif temp <= low %}
+                  {{ min_speed }}
+                {% else %}
+                  {{
+                    (
+                      min_speed
+                      + ((temp - low) / (high - low))
+                      * (max_speed - min_speed)
+                    )
+                    | round(0)
+                    | int
+                  }}
+                {% endif %}
+
+    default:
+      - service: fan.turn_off
+        target:
+          entity_id: !input fan_entity
+
+mode: restart
+max_exceeded: silent

@@ -1,0 +1,145 @@
+blueprint:
+  name: Calendar Event - Android Notification Reminder
+  description: >
+    Sends an Android Companion App notification before a calendar event.
+
+    Choose the calendar, how long before the event to notify, the mobile_app
+    notification action, and the Android notification channel.
+
+    Requires Home Assistant 2026.2 or newer.
+  domain: automation
+
+  homeassistant:
+    min_version: 2026.2.0
+
+  input:
+
+    calendar_entity:
+      name: Calendar
+      description: Calendar to monitor for upcoming events.
+      selector:
+        entity:
+          filter:
+            - domain: calendar
+
+    reminder_lead_time:
+      name: Notify before event
+      description: >
+        How long before the calendar event the notification should be sent.
+      default:
+        hours: 3
+        minutes: 0
+      selector:
+        duration:
+          enable_day: true
+          enable_second: false
+
+    notify_action:
+      name: Mobile notification action
+      description: >
+        Enter your Home Assistant Companion App notification action.
+
+        Example:
+        notify.mobile_app_adams_phone
+      selector:
+        text:
+
+    notification_channel:
+      name: Android notification channel
+      description: >
+        Android notification channel to use. The channel will be created
+        automatically on the Android device the first time it is used.
+      default: "Calendar Reminders"
+      selector:
+        text:
+
+    channel_importance:
+      name: Channel importance
+      description: >
+        Initial Android importance for the notification channel.
+        After Android creates the channel, you can customize its behavior
+        directly in Android notification settings.
+      default: default
+      selector:
+        select:
+          options:
+            - label: Minimum
+              value: min
+            - label: Low
+              value: low
+            - label: Default
+              value: default
+            - label: High
+              value: high
+            - label: Maximum
+              value: max
+
+    include_all_day_events:
+      name: Include all-day events
+      description: >
+        Send reminders for all-day calendar events too.
+        Usually best left disabled because all-day events begin at midnight.
+      default: false
+      selector:
+        boolean:
+
+variables:
+  include_all_day: !input include_all_day_events
+
+triggers:
+  - trigger: calendar.event_started
+    target:
+      entity_id: !input calendar_entity
+    options:
+      offset: !input reminder_lead_time
+      offset_type: before
+
+conditions:
+
+  # Ignore all-day events unless explicitly enabled.
+  - condition: template
+    value_template: >
+      {{
+        include_all_day
+        or not trigger.calendar_event.all_day
+      }}
+
+actions:
+
+  - variables:
+      event_title: >
+        {{ trigger.calendar_event.summary | default('Calendar event', true) }}
+
+      event_location: >
+        {{ trigger.calendar_event.location | default('', true) }}
+
+      event_start: >
+        {{ trigger.calendar_event.start }}
+
+      event_all_day: >
+        {{ trigger.calendar_event.all_day }}
+
+  - action: !input notify_action
+    data:
+
+      title: "📅 {{ event_title }}"
+
+      message: >-
+        {% if event_all_day %}
+          All-day event on
+          {{ (event_start | as_datetime | as_local).strftime('%A, %B %d') }}.
+        {% else %}
+          Starts
+          {{ (event_start | as_datetime | as_local).strftime('%A, %B %d at %I:%M %p') }}.
+        {% endif %}
+        {% if event_location | trim %}
+          📍 {{ event_location }}
+        {% endif %}
+
+      data:
+        channel: !input notification_channel
+        importance: !input channel_importance
+        group: calendar_reminders
+
+mode: parallel
+max: 10

@@ -1,0 +1,125 @@
+blueprint:
+  name: Presence-boosted air purifiers
+  description: >
+    Temporarily boost one or more air purifiers when motion, occupancy,
+    or presence is detected.
+
+    The purifiers remain boosted while any selected sensor is active.
+    Once all sensors are clear, the boost remains active for the configured
+    hold time, then the purifiers are restored to their exact state from
+    before the boost started.
+
+  domain: automation
+
+  input:
+    presence_sensors:
+      name: Motion / presence sensors
+      description: >
+        Select one or more motion, occupancy, or presence binary sensors.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - motion
+                - occupancy
+                - presence
+
+    air_purifiers:
+      name: Air purifiers
+      description: >
+        Select one or more fan entities representing your air purifiers.
+        They must support percentage-based fan speed control.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: fan
+
+    boost_percentage:
+      name: Boost fan speed
+      description: Fan speed to use while presence is detected.
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+
+    hold_time:
+      name: Hold time after presence clears
+      description: >
+        How long to keep the purifiers boosted after all selected
+        motion/presence sensors have cleared.
+      default:
+        minutes: 10
+      selector:
+        duration:
+
+variables:
+  presence_entities: !input presence_sensors
+
+  # Each automation made from this blueprint gets its own temporary scene.
+  snapshot_scene_id: >
+    {{ 'air_purifier_before_boost_' ~ this.entity_id.split('.')[-1] }}
+
+  snapshot_scene_entity: >
+    {{ 'scene.air_purifier_before_boost_' ~ this.entity_id.split('.')[-1] }}
+
+triggers:
+  - trigger: state
+    entity_id: !input presence_sensors
+    to: "on"
+
+actions:
+  # Only take the snapshot at the beginning of a boost cycle.
+  # If another presence event restarts the automation, do not overwrite
+  # the original pre-boost state with the already-boosted state.
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ snapshot_scene_entity not in
+                 (states.scene | map(attribute='entity_id') | list) }}
+        sequence:
+          - action: scene.create
+            data:
+              scene_id: "{{ snapshot_scene_id }}"
+              snapshot_entities: !input air_purifiers
+
+  # Turn the purifiers on and set the boosted speed.
+  - action: fan.turn_on
+    target:
+      entity_id: !input air_purifiers
+    data:
+      percentage: !input boost_percentage
+
+  # Stay boosted for as long as at least one selected sensor is active.
+  - wait_template: >
+      {{
+        expand(presence_entities)
+        | selectattr('state', 'eq', 'on')
+        | list
+        | count == 0
+      }}
+
+  # Continue boosting for the configured time after the room clears.
+  - delay: !input hold_time
+
+  # Restore exactly how the purifiers were before the first detection.
+  - action: scene.turn_on
+    target:
+      entity_id: "{{ snapshot_scene_entity }}"
+
+  # Clean up the temporary snapshot.
+  - action: scene.delete
+    data:
+      entity_id: "{{ snapshot_scene_entity }}"
+
+# A new detection during the hold period restarts the countdown,
+# without overwriting the original pre-boost snapshot.
+mode: restart
+max_exceeded: silent

@@ -1,0 +1,256 @@
+blueprint:
+  name: Presence Lighting with Inovelli Manual-Off Lockout
+  description: >
+    Presence-based lighting with a persistent manual-off lockout.
+
+    When the configured Inovelli OFF/down-paddle trigger fires:
+      1. The lights are turned off.
+      2. Manual-off lockout is enabled.
+      3. Presence is NOT allowed to turn the lights back on.
+
+    The lockout is cleared ONLY when the configured Inovelli
+    ON/up-paddle trigger fires.
+
+    This prevents presence/motion from fighting someone who
+    intentionally turned the lights off at the wall switch.
+
+  domain: automation
+
+  homeassistant:
+    min_version: 2024.10.0
+
+  input:
+
+    presence_sensors:
+      name: Presence sensors
+      description: >
+        Select the motion, occupancy, or presence sensors for this room.
+        Any sensor detecting presence can turn the lights on.
+        All sensors must be clear before the lights turn off.
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
+              device_class:
+                - motion
+                - occupancy
+                - presence
+          multiple: true
+
+    lights:
+      name: Lights
+      description: Lights controlled by this automation.
+      selector:
+        target:
+          entity:
+            - domain: light
+
+    manual_lockout:
+      name: Manual-off lockout helper
+      description: >
+        Create a Toggle helper (input_boolean) specifically for this room.
+
+        OFF = presence lighting is allowed.
+        ON = someone manually turned the lights off with the Inovelli
+        switch and presence lighting is forbidden from turning them on.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+
+    inovelli_off_triggers:
+      name: Inovelli OFF / Down Paddle
+      description: >
+        Add the physical Inovelli switch trigger that represents manually
+        turning the lights OFF. Normally this is a single press of the
+        DOWN paddle.
+
+        You may add more than one trigger if desired.
+      selector:
+        trigger:
+
+    inovelli_on_triggers:
+      name: Inovelli ON / Up Paddle
+      description: >
+        Add the physical Inovelli switch trigger that represents manually
+        turning the lights ON. Normally this is a single press of the
+        UP paddle.
+
+        THIS IS THE ONLY EVENT THAT CLEARS MANUAL-OFF LOCKOUT.
+
+        You may add more than one trigger if desired.
+      selector:
+        trigger:
+
+    no_presence_delay:
+      name: No-presence turn-off delay
+      description: >
+        How long all presence sensors must be clear before the
+        lights are turned off.
+      default:
+        minutes: 2
+      selector:
+        duration:
+
+
+# Store blueprint inputs so templates can inspect them.
+variables:
+  presence_entities: !input presence_sensors
+  configured_off_triggers: !input inovelli_off_triggers
+  configured_on_triggers: !input inovelli_on_triggers
+
+
+triggers:
+
+  # ------------------------------------------------------------
+  # Trigger group 1:
+  # Inovelli physical OFF / down paddle
+  # ------------------------------------------------------------
+  - triggers: !input inovelli_off_triggers
+
+  # ------------------------------------------------------------
+  # Trigger group 2:
+  # Inovelli physical ON / up paddle
+  # ------------------------------------------------------------
+  - triggers: !input inovelli_on_triggers
+
+  # ------------------------------------------------------------
+  # Presence detected
+  # ------------------------------------------------------------
+  - trigger: state
+    entity_id: !input presence_sensors
+    to: "on"
+    id: presence_on
+
+  # ------------------------------------------------------------
+  # Presence cleared
+  # ------------------------------------------------------------
+  - trigger: state
+    entity_id: !input presence_sensors
+    to: "off"
+    for: !input no_presence_delay
+    id: presence_off
+
+
+actions:
+
+  - choose:
+
+      # ========================================================
+      # INOVELLI OFF
+      #
+      # FIRST set the lockout.
+      # THEN turn the lights off.
+      #
+      # From this point forward, presence cannot turn them on.
+      # ========================================================
+      - conditions:
+          - condition: template
+            value_template: >
+              {% set i = trigger.idx | int(-1) %}
+              {% set off_count = configured_off_triggers | count %}
+              {{ i >= 0 and i < off_count }}
+
+        sequence:
+
+          # Engage manual-off lockout FIRST.
+          - action: input_boolean.turn_on
+            target:
+              entity_id: !input manual_lockout
+
+          # Then force the controlled lights off.
+          - action: light.turn_off
+            target: !input lights
+
+
+      # ========================================================
+      # INOVELLI ON
+      #
+      # This is the ONLY branch that removes the lockout.
+      # It also turns the lights on.
+      # ========================================================
+      - conditions:
+          - condition: template
+            value_template: >
+              {% set i = trigger.idx | int(-1) %}
+              {% set off_count = configured_off_triggers | count %}
+              {% set on_count = configured_on_triggers | count %}
+              {{
+                i >= off_count
+                and
+                i < (off_count + on_count)
+              }}
+
+        sequence:
+
+          # Physical ON paddle authorizes automatic lighting again.
+          - action: input_boolean.turn_off
+            target:
+              entity_id: !input manual_lockout
+
+          # Treat the physical ON paddle as an explicit request
+          # to turn on the room.
+          - action: light.turn_on
+            target: !input lights
+
+
+      # ========================================================
+      # PRESENCE DETECTED
+      #
+      # CRITICAL:
+      # light.turn_on is unreachable while manual_lockout = ON.
+      # ========================================================
+      - conditions:
+
+          - condition: trigger
+            id: presence_on
+
+          - condition: state
+            entity_id: !input manual_lockout
+            state: "off"
+
+        sequence:
+
+          - action: light.turn_on
+            target: !input lights
+
+
+      # ========================================================
+      # NO PRESENCE
+      #
+      # Make sure ALL selected presence sensors are actually off.
+      #
+      # Turning the lights off automatically DOES NOT engage or
+      # clear the manual lockout.
+      # ========================================================
+      - conditions:
+
+          - condition: trigger
+            id: presence_off
+
+          - condition: template
+            value_template: >
+              {% set all_states = expand(presence_entities) %}
+              {{
+                all_states | count > 0
+                and
+                (
+                  all_states
+                  | selectattr('state', 'eq', 'off')
+                  | list
+                  | count
+                )
+                ==
+                (all_states | count)
+              }}
+
+        sequence:
+
+          - action: light.turn_off
+            target: !input lights
+
+
+# Queue events so an OFF paddle event and a simultaneous presence
+# event cannot execute the automation branches in parallel.
+mode: queued
+max: 20

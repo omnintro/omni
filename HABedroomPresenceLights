@@ -1,18 +1,25 @@
 blueprint:
-  name: Presence Lighting with Inovelli Manual-Off Lockout
+  name: Presence Lighting with Inovelli Manual-Off Lockout (Zigbee + Matter)
   description: >
-    Presence-based lighting with a persistent manual-off lockout.
+    Presence-based lighting that respects a physical Inovelli OFF command.
 
-    When the configured Inovelli OFF/down-paddle trigger fires:
-      1. The lights are turned off.
-      2. Manual-off lockout is enabled.
-      3. Presence is NOT allowed to turn the lights back on.
+    When the configured Inovelli OFF/down-paddle trigger fires, this automation
+    immediately enables a persistent manual-off lockout and turns the controlled
+    load(s) off.
 
-    The lockout is cleared ONLY when the configured Inovelli
-    ON/up-paddle trigger fires.
+    While that lockout is enabled, presence ABSOLUTELY CANNOT turn the
+    controlled load(s) back on.
 
-    This prevents presence/motion from fighting someone who
-    intentionally turned the lights off at the wall switch.
+    The lockout is cleared ONLY by the configured Inovelli ON/up-paddle trigger.
+
+    Supports:
+      - Inovelli Zigbee device triggers
+      - Inovelli Matter event entities
+      - light.* entities
+      - switch.* entities, including Matter on/off switches
+
+    A dedicated input_boolean helper is required to store the manual-off
+    lockout state.
 
   domain: automation
 
@@ -24,107 +31,185 @@ blueprint:
     presence_sensors:
       name: Presence sensors
       description: >
-        Select the motion, occupancy, or presence sensors for this room.
-        Any sensor detecting presence can turn the lights on.
-        All sensors must be clear before the lights turn off.
+        Select one or more motion, occupancy, or presence binary sensors.
+
+        Presence may turn the controlled load(s) on ONLY when the
+        manual-off lockout helper is OFF.
       selector:
         entity:
+          multiple: true
           filter:
             - domain: binary_sensor
               device_class:
                 - motion
                 - occupancy
                 - presence
-          multiple: true
 
-    lights:
-      name: Lights
-      description: Lights controlled by this automation.
+
+    controlled_loads:
+      name: Lights / switches to control
+      description: >
+        Select the lighting loads controlled by presence.
+
+        Both light.* and switch.* entities are supported.
+
+        Inovelli Zigbee dimmers commonly appear as light.* entities.
+        Inovelli Matter on/off switches may appear as switch.* entities.
       selector:
         target:
           entity:
-            - domain: light
+            domain:
+              - light
+              - switch
+
 
     manual_lockout:
       name: Manual-off lockout helper
       description: >
-        Create a Toggle helper (input_boolean) specifically for this room.
+        Select a dedicated Toggle helper (input_boolean) for this room.
 
-        OFF = presence lighting is allowed.
-        ON = someone manually turned the lights off with the Inovelli
+        OFF = Presence lighting is permitted.
+
+        ON = Someone physically turned the lights off from the Inovelli
         switch and presence lighting is forbidden from turning them on.
+
+        This helper is cleared ONLY by the physical Inovelli ON trigger.
       selector:
         entity:
           filter:
             - domain: input_boolean
 
-    inovelli_off_triggers:
-      name: Inovelli OFF / Down Paddle
-      description: >
-        Add the physical Inovelli switch trigger that represents manually
-        turning the lights OFF. Normally this is a single press of the
-        DOWN paddle.
 
-        You may add more than one trigger if desired.
+    inovelli_off_triggers:
+      name: Inovelli physical OFF / Down Paddle trigger(s)
+      description: >
+        Configure the physical action that means the user intentionally
+        turned the lighting OFF.
+
+        ZIGBEE:
+        Select the Inovelli device trigger corresponding to a single press
+        of the DOWN paddle.
+
+        MATTER:
+        Add a STATE trigger using the switch's event.*_down entity.
+
+        IMPORTANT FOR MATTER:
+        Leave From, To, and Attribute blank.
+
+        The blueprint checks event_type itself. This allows consecutive
+        single presses to work correctly.
       selector:
         trigger:
+
 
     inovelli_on_triggers:
-      name: Inovelli ON / Up Paddle
+      name: Inovelli physical ON / Up Paddle trigger(s)
       description: >
-        Add the physical Inovelli switch trigger that represents manually
-        turning the lights ON. Normally this is a single press of the
-        UP paddle.
+        Configure the physical action that means the user intentionally
+        turned the lighting ON.
 
-        THIS IS THE ONLY EVENT THAT CLEARS MANUAL-OFF LOCKOUT.
+        ZIGBEE:
+        Select the Inovelli device trigger corresponding to a single press
+        of the UP paddle.
 
-        You may add more than one trigger if desired.
+        MATTER:
+        Add a STATE trigger using the switch's event.*_up entity.
+
+        IMPORTANT FOR MATTER:
+        Leave From, To, and Attribute blank.
+
+        THIS IS THE ONLY TRIGGER GROUP THAT CLEARS THE MANUAL-OFF LOCKOUT.
       selector:
         trigger:
+
+
+    matter_single_press_event_type:
+      name: Matter single-press event type
+      description: >
+        The event_type Home Assistant reports for a single paddle press
+        on an Inovelli Matter switch.
+
+        Current Inovelli Matter switches normally use:
+
+        multi_press_1
+
+        You should normally leave this unchanged.
+      default: multi_press_1
+      selector:
+        text:
+
 
     no_presence_delay:
       name: No-presence turn-off delay
       description: >
-        How long all presence sensors must be clear before the
-        lights are turned off.
+        How long a presence sensor must remain clear before the automation
+        checks that ALL selected presence sensors are clear and turns the
+        lighting off.
       default:
         minutes: 2
       selector:
         duration:
 
 
-# Store blueprint inputs so templates can inspect them.
+# ======================================================================
+# VARIABLES
+# ======================================================================
+
 variables:
+
   presence_entities: !input presence_sensors
+
   configured_off_triggers: !input inovelli_off_triggers
+
   configured_on_triggers: !input inovelli_on_triggers
 
+  matter_single_press_type: !input matter_single_press_event_type
+
+
+# ======================================================================
+# TRIGGERS
+# ======================================================================
 
 triggers:
 
-  # ------------------------------------------------------------
-  # Trigger group 1:
-  # Inovelli physical OFF / down paddle
-  # ------------------------------------------------------------
+  # --------------------------------------------------------------------
+  # INOVELLI OFF TRIGGERS
+  #
+  # These may be:
+  #   - Zigbee device triggers
+  #   - Matter event.*_down state triggers
+  #
+  # Home Assistant flattens this trigger list.
+  # --------------------------------------------------------------------
+
   - triggers: !input inovelli_off_triggers
 
-  # ------------------------------------------------------------
-  # Trigger group 2:
-  # Inovelli physical ON / up paddle
-  # ------------------------------------------------------------
+
+  # --------------------------------------------------------------------
+  # INOVELLI ON TRIGGERS
+  #
+  # These may be:
+  #   - Zigbee device triggers
+  #   - Matter event.*_up state triggers
+  # --------------------------------------------------------------------
+
   - triggers: !input inovelli_on_triggers
 
-  # ------------------------------------------------------------
-  # Presence detected
-  # ------------------------------------------------------------
+
+  # --------------------------------------------------------------------
+  # PRESENCE DETECTED
+  # --------------------------------------------------------------------
+
   - trigger: state
     entity_id: !input presence_sensors
     to: "on"
     id: presence_on
 
-  # ------------------------------------------------------------
-  # Presence cleared
-  # ------------------------------------------------------------
+
+  # --------------------------------------------------------------------
+  # PRESENCE CLEARED
+  # --------------------------------------------------------------------
+
   - trigger: state
     entity_id: !input presence_sensors
     to: "off"
@@ -132,125 +217,302 @@ triggers:
     id: presence_off
 
 
+# ======================================================================
+# ACTIONS
+# ======================================================================
+
 actions:
 
   - choose:
 
-      # ========================================================
-      # INOVELLI OFF
+
+      # ================================================================
+      # PHYSICAL INOVELLI OFF
       #
-      # FIRST set the lockout.
-      # THEN turn the lights off.
+      # MOST IMPORTANT PART OF THE BLUEPRINT:
       #
-      # From this point forward, presence cannot turn them on.
-      # ========================================================
-      - conditions:
+      # 1. Engage the lockout FIRST.
+      # 2. Turn the lighting OFF.
+      #
+      # Once the helper is ON, presence cannot reach a turn_on action.
+      # ================================================================
+
+      - alias: Inovelli physical OFF - engage manual lockout
+
+        conditions:
+
+          # ------------------------------------------------------------
+          # Determine whether this trigger came from the OFF trigger list.
+          #
+          # trigger.idx is the flattened trigger's index.
+          # All OFF triggers are first in the complete trigger list.
+          # ------------------------------------------------------------
+
           - condition: template
+            alias: Trigger came from configured OFF trigger group
             value_template: >
               {% set i = trigger.idx | int(-1) %}
               {% set off_count = configured_off_triggers | count %}
+
               {{ i >= 0 and i < off_count }}
+
+
+          # ------------------------------------------------------------
+          # MATTER EVENT FILTER
+          #
+          # Matter event entities fire whenever that paddle generates an
+          # event. We only want a normal single press to count as the
+          # standard OFF action.
+          #
+          # Zigbee device triggers aren't event.* state entities, so they
+          # automatically pass this condition.
+          # ------------------------------------------------------------
+
+          - condition: template
+            alias: Matter event is single press or trigger is not Matter event entity
+            value_template: >
+              {% if
+                    trigger.platform == 'state'
+                    and trigger.to_state is not none
+                    and trigger.to_state.entity_id.startswith('event.')
+              %}
+
+                {{
+                  trigger.to_state.attributes.get('event_type', '')
+                  ==
+                  matter_single_press_type
+                }}
+
+              {% else %}
+
+                true
+
+              {% endif %}
+
 
         sequence:
 
-          # Engage manual-off lockout FIRST.
-          - action: input_boolean.turn_on
+          # ------------------------------------------------------------
+          # CRITICAL:
+          # Engage lockout BEFORE doing anything with the controlled load.
+          # ------------------------------------------------------------
+
+          - alias: Engage manual-off lockout
+            action: input_boolean.turn_on
             target:
               entity_id: !input manual_lockout
 
-          # Then force the controlled lights off.
-          - action: light.turn_off
-            target: !input lights
+
+          # ------------------------------------------------------------
+          # Generic Home Assistant action supports light.* AND switch.*
+          # ------------------------------------------------------------
+
+          - alias: Turn controlled lighting OFF
+            action: homeassistant.turn_off
+            target: !input controlled_loads
 
 
-      # ========================================================
-      # INOVELLI ON
+
+      # ================================================================
+      # PHYSICAL INOVELLI ON
       #
-      # This is the ONLY branch that removes the lockout.
-      # It also turns the lights on.
-      # ========================================================
-      - conditions:
+      # This is intentionally the ONLY branch anywhere in this blueprint
+      # that clears the lockout helper.
+      # ================================================================
+
+      - alias: Inovelli physical ON - clear manual lockout
+
+        conditions:
+
+          # ------------------------------------------------------------
+          # Determine whether this trigger came from the ON trigger list.
+          # ------------------------------------------------------------
+
           - condition: template
+            alias: Trigger came from configured ON trigger group
             value_template: >
               {% set i = trigger.idx | int(-1) %}
-              {% set off_count = configured_off_triggers | count %}
-              {% set on_count = configured_on_triggers | count %}
+
+              {% set off_count =
+                   configured_off_triggers | count %}
+
+              {% set on_count =
+                   configured_on_triggers | count %}
+
               {{
                 i >= off_count
                 and
                 i < (off_count + on_count)
               }}
 
+
+          # ------------------------------------------------------------
+          # Matter event entity single-press filter.
+          # ------------------------------------------------------------
+
+          - condition: template
+            alias: Matter event is single press or trigger is not Matter event entity
+            value_template: >
+              {% if
+                    trigger.platform == 'state'
+                    and trigger.to_state is not none
+                    and trigger.to_state.entity_id.startswith('event.')
+              %}
+
+                {{
+                  trigger.to_state.attributes.get('event_type', '')
+                  ==
+                  matter_single_press_type
+                }}
+
+              {% else %}
+
+                true
+
+              {% endif %}
+
+
         sequence:
 
-          # Physical ON paddle authorizes automatic lighting again.
-          - action: input_boolean.turn_off
+          # ------------------------------------------------------------
+          # ONLY PLACE THE LOCKOUT IS CLEARED
+          # ------------------------------------------------------------
+
+          - alias: Clear manual-off lockout
+            action: input_boolean.turn_off
             target:
               entity_id: !input manual_lockout
 
-          # Treat the physical ON paddle as an explicit request
-          # to turn on the room.
-          - action: light.turn_on
-            target: !input lights
+
+          # ------------------------------------------------------------
+          # Physical UP is treated as an explicit request to turn the
+          # room lighting on.
+          #
+          # Generic action works with light.* and switch.*.
+          # ------------------------------------------------------------
+
+          - alias: Turn controlled lighting ON
+            action: homeassistant.turn_on
+            target: !input controlled_loads
 
 
-      # ========================================================
+
+      # ================================================================
       # PRESENCE DETECTED
       #
-      # CRITICAL:
-      # light.turn_on is unreachable while manual_lockout = ON.
-      # ========================================================
-      - conditions:
+      # THIS IS THE HARD LOCKOUT.
+      #
+      # The turn_on action below cannot execute unless manual_lockout
+      # is OFF.
+      # ================================================================
+
+      - alias: Presence detected - turn on only when authorized
+
+        conditions:
 
           - condition: trigger
             id: presence_on
+
+
+          # ------------------------------------------------------------
+          # ABSOLUTE PRESENCE LOCKOUT
+          #
+          # If someone pressed DOWN on the Inovelli switch:
+          #
+          # manual_lockout = ON
+          #
+          # Therefore this condition fails.
+          #
+          # Therefore homeassistant.turn_on below is unreachable.
+          # ------------------------------------------------------------
 
           - condition: state
             entity_id: !input manual_lockout
             state: "off"
 
+
         sequence:
 
-          - action: light.turn_on
-            target: !input lights
+          - alias: Presence authorized - turn lighting ON
+            action: homeassistant.turn_on
+            target: !input controlled_loads
 
 
-      # ========================================================
-      # NO PRESENCE
+
+      # ================================================================
+      # PRESENCE CLEARED
       #
-      # Make sure ALL selected presence sensors are actually off.
+      # Turning lighting off automatically does NOT alter the lockout.
       #
-      # Turning the lights off automatically DOES NOT engage or
-      # clear the manual lockout.
-      # ========================================================
-      - conditions:
+      # Automatic OFF:
+      #   Does not enable lockout.
+      #   Does not disable lockout.
+      #
+      # Only physical Inovelli paddle actions change the lockout.
+      # ================================================================
+
+      - alias: All presence clear - turn lighting OFF
+
+        conditions:
 
           - condition: trigger
             id: presence_off
 
+
+          # ------------------------------------------------------------
+          # If several presence sensors are selected, one sensor's timer
+          # may expire while another sensor still detects presence.
+          #
+          # Make sure every sensor is actually OFF.
+          # ------------------------------------------------------------
+
           - condition: template
+            alias: Every selected presence sensor is OFF
             value_template: >
-              {% set all_states = expand(presence_entities) %}
+              {% set sensors = expand(presence_entities) %}
+
               {{
-                all_states | count > 0
+                sensors | count > 0
                 and
                 (
-                  all_states
+                  sensors
                   | selectattr('state', 'eq', 'off')
                   | list
                   | count
                 )
                 ==
-                (all_states | count)
+                (sensors | count)
               }}
+
 
         sequence:
 
-          - action: light.turn_off
-            target: !input lights
+          - alias: Turn controlled lighting OFF
+            action: homeassistant.turn_off
+            target: !input controlled_loads
 
 
-# Queue events so an OFF paddle event and a simultaneous presence
-# event cannot execute the automation branches in parallel.
+# ======================================================================
+# EXECUTION MODE
+#
+# Queue events instead of allowing simultaneous automation runs.
+#
+# Example:
+#
+#   Person presses DOWN
+#   Presence sensor reports movement 50 ms later
+#
+# Processing order:
+#
+#   1. DOWN event
+#   2. lockout helper -> ON
+#   3. lights -> OFF
+#   4. presence event processes
+#   5. lockout condition fails
+#   6. lights remain OFF
+#
+# ======================================================================
+
 mode: queued
 max: 20
+max_exceeded: silent

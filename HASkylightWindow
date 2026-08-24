@@ -1,0 +1,119 @@
+blueprint:
+  name: Skylight - Indoor vs Outdoor Temperature
+  description: >
+    Automatically opens a skylight when the outdoor temperature is cooler
+    than the indoor temperature by a configurable amount.
+
+    The skylight closes when the outdoor temperature becomes equal to or
+    warmer than the indoor temperature.
+
+    Between those two thresholds, the skylight keeps its current position
+    to prevent frequent opening and closing.
+  domain: automation
+
+  input:
+    indoor_temperature:
+      name: Indoor temperature sensor
+      description: Temperature sensor measuring the indoor temperature.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: temperature
+
+    outdoor_temperature:
+      name: Outdoor temperature sensor
+      description: Temperature sensor measuring the outdoor temperature.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: temperature
+
+    skylight:
+      name: Skylight
+      description: The skylight cover entity to open and close.
+      selector:
+        entity:
+          filter:
+            - domain: cover
+
+    temperature_difference:
+      name: Minimum temperature difference
+      description: >
+        How much cooler it must be outside before opening the skylight.
+        Uses the same temperature units as your sensors.
+      default: 1.0
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 0.5
+          mode: slider
+
+variables:
+  indoor_sensor: !input indoor_temperature
+  outdoor_sensor: !input outdoor_temperature
+  skylight_entity: !input skylight
+  temp_difference: !input temperature_difference
+
+triggers:
+  # Re-evaluate whenever either temperature changes
+  - trigger: state
+    entity_id:
+      - !input indoor_temperature
+      - !input outdoor_temperature
+
+  # Also evaluate when Home Assistant starts
+  - trigger: homeassistant
+    event: start
+
+conditions:
+  # Don't operate if either sensor is unavailable or non-numeric
+  - condition: template
+    value_template: >
+      {{
+        is_number(states(indoor_sensor))
+        and is_number(states(outdoor_sensor))
+      }}
+
+actions:
+  - choose:
+
+      # OPEN:
+      # Outside is cooler than inside by at least the configured difference
+      - conditions:
+          - condition: template
+            value_template: >
+              {{
+                states(outdoor_sensor) | float
+                <=
+                (states(indoor_sensor) | float) - (temp_difference | float)
+              }}
+          - condition: template
+            value_template: >
+              {{ states(skylight_entity) not in ['open', 'opening'] }}
+        sequence:
+          - action: cover.open_cover
+            target:
+              entity_id: !input skylight
+
+      # CLOSE:
+      # Outside is now as warm as, or warmer than, inside
+      - conditions:
+          - condition: template
+            value_template: >
+              {{
+                states(outdoor_sensor) | float
+                >=
+                states(indoor_sensor) | float
+              }}
+          - condition: template
+            value_template: >
+              {{ states(skylight_entity) not in ['closed', 'closing'] }}
+        sequence:
+          - action: cover.close_cover
+            target:
+              entity_id: !input skylight
+
+mode: restart

@@ -1,0 +1,455 @@
+blueprint:
+  name: Kiosk Satellite - Persistent Voice Volume
+  description: >-
+    Preserves voice-requested volume changes when Kiosk Satellite ducks an
+    external media player and later restores its pre-Assist volume.
+
+    The blueprint does not intercept conversation sentences or replace Assist
+    intents. It watches the selected media player's volume only while the
+    selected Assist Satellite is processing a request, remembers absolute or
+    relative volume changes, then reapplies the intended result after the
+    Assist session returns to idle.
+
+    This allows compound requests and also works with LLM-controlled volume
+    changes as long as the LLM ultimately changes the selected Home Assistant
+    media_player.
+  domain: automation
+  homeassistant:
+    min_version: 2024.6.0
+  input:
+    assist_satellite:
+      name: Assist satellite
+      description: The Kiosk Satellite assist_satellite entity for this room.
+      selector:
+        entity:
+          filter:
+            - domain: assist_satellite
+
+    media_player:
+      name: Media player
+      description: The external speaker/player that Kiosk Satellite ducks.
+      selector:
+        entity:
+          filter:
+            - domain: media_player
+
+    processing_guard_ms:
+      name: Processing guard
+      description: >-
+        Ignore player volume changes for this many milliseconds immediately
+        after the satellite enters processing. During this short window,
+        changes are treated as late-arriving ducking changes and update the
+        processing baseline instead. Set to 0 if very fast local volume
+        commands are being missed.
+      default: 150
+      selector:
+        number:
+          min: 0
+          max: 1000
+          step: 25
+          unit_of_measurement: ms
+          mode: slider
+
+    late_relative_grace_ms:
+      name: Late relative-volume grace
+      description: >-
+        When processing ends before a relative volume change has appeared in
+        the media player's state, keep watching briefly while the satellite is
+        responding. This helps with media players whose volume state updates
+        slightly after the native relative-volume handler returns.
+      default: 400
+      selector:
+        number:
+          min: 0
+          max: 1500
+          step: 50
+          unit_of_measurement: ms
+          mode: slider
+
+    session_timeout_seconds:
+      name: Session timeout
+      description: >-
+        Stop watching an interaction if no relevant event occurs for this long.
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 180
+          step: 5
+          unit_of_measurement: s
+          mode: slider
+
+    restore_delay_ms:
+      name: Kiosk restore delay
+      description: >-
+        Delay after the satellite returns to idle before calculating and
+        applying the final volume. Increase this if Kiosk Satellite restores
+        the old volume after this automation applies the requested volume.
+      default: 750
+      selector:
+        number:
+          min: 0
+          max: 5000
+          step: 50
+          unit_of_measurement: ms
+          mode: slider
+
+mode: single
+max_exceeded: silent
+
+variables:
+  satellite_entity: !input assist_satellite
+  player_entity: !input media_player
+  processing_guard_ms_value: !input processing_guard_ms
+  late_relative_grace_ms_value: !input late_relative_grace_ms
+  session_timeout_seconds_value: !input session_timeout_seconds
+  restore_delay_ms_value: !input restore_delay_ms
+
+triggers:
+  - trigger: state
+    entity_id: !input assist_satellite
+    to: "listening"
+
+conditions: []
+
+actions:
+  # These variables live for this one Assist interaction. Because the
+  # automation is mode: single, follow-up listening turns do not start a
+  # second run and wipe the pending volume operation.
+  - variables:
+      phase: "listening"
+      processing_started_at: 0
+
+      # Per-processing-turn tracking.
+      cycle_baseline: null
+      cycle_last_volume: null
+      cycle_state_changed: false
+      cycle_absolute_seen: false
+      cycle_absolute_target: null
+
+      # Accumulated operation for the whole Assist interaction.
+      # pending_type is: none | relative | absolute
+      pending_type: "none"
+      pending_value: 0.0
+
+      session_done: false
+
+  - repeat:
+      while:
+        - condition: template
+          value_template: "{{ not session_done }}"
+      sequence:
+        - wait_for_trigger:
+            - trigger: state
+              entity_id: !input assist_satellite
+              to: "listening"
+              id: satellite_listening
+
+            - trigger: state
+              entity_id: !input assist_satellite
+              to: "processing"
+              id: satellite_processing
+
+            - trigger: state
+              entity_id: !input assist_satellite
+              to: "responding"
+              id: satellite_responding
+
+            - trigger: state
+              entity_id: !input assist_satellite
+              to: "idle"
+              id: satellite_idle
+
+            - trigger: state
+              entity_id: !input media_player
+              attribute: volume_level
+              id: player_volume_changed
+
+            # Absolute volume requests handled by HA/LLMs normally arrive as
+            # media_player.volume_set calls. The target is filtered below so
+            # volume changes in other rooms are ignored.
+            - trigger: event
+              event_type: call_service
+              event_data:
+                domain: media_player
+                service: volume_set
+              id: media_volume_set_call
+
+          timeout:
+            seconds: "{{ session_timeout_seconds_value | int(60) }}"
+          continue_on_timeout: true
+
+        - choose:
+            # Nothing relevant happened before the timeout.
+            - conditions:
+                - condition: template
+                  value_template: "{{ wait.trigger is none }}"
+              sequence:
+                - variables:
+                    session_done: true
+
+            # A new processing turn begins. Capture the currently ducked
+            # volume as the relative-command baseline.
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {{ wait.trigger is not none
+                       and wait.trigger.id == 'satellite_processing' }}
+              sequence:
+                - variables:
+                    phase: "processing"
+                    processing_started_at: "{{ as_timestamp(now()) }}"
+                    cycle_baseline: >-
+                      {% set v = state_attr(player_entity, 'volume_level') %}
+                      {{ v if v is number else none }}
+                    cycle_last_volume: >-
+                      {% set v = state_attr(player_entity, 'volume_level') %}
+                      {{ v if v is number else none }}
+                    cycle_state_changed: false
+                    cycle_absolute_seen: false
+                    cycle_absolute_target: null
+
+            # If a delayed ducking state update lands just after processing
+            # starts, absorb it into the baseline instead of treating it as a
+            # requested relative-volume change.
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {% if wait.trigger is none
+                          or wait.trigger.id != 'player_volume_changed'
+                          or phase != 'processing' %}
+                      false
+                    {% else %}
+                      {% set new = wait.trigger.to_state.attributes.get('volume_level')
+                           if wait.trigger.to_state is not none else none %}
+                      {% set elapsed_ms =
+                           (as_timestamp(now()) - processing_started_at | float(0)) * 1000 %}
+                      {{ new is number
+                         and elapsed_ms < (processing_guard_ms_value | float(150)) }}
+                    {% endif %}
+              sequence:
+                - variables:
+                    cycle_baseline: >-
+                      {{ wait.trigger.to_state.attributes.get('volume_level') }}
+                    cycle_last_volume: >-
+                      {{ wait.trigger.to_state.attributes.get('volume_level') }}
+
+            # Absolute volume request: remember the requested target. The
+            # call_service event is emitted before the service is executed.
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {% if wait.trigger is none
+                          or wait.trigger.id != 'media_volume_set_call'
+                          or phase != 'processing' %}
+                      false
+                    {% else %}
+                      {% set e = wait.trigger.event.data %}
+                      {% set sd = e.get('service_data', {}) %}
+                      {% set ids = sd.get('entity_id', []) %}
+                      {% set requested = sd.get('volume_level') %}
+                      {% set elapsed_ms =
+                           (as_timestamp(now()) - processing_started_at | float(0)) * 1000 %}
+                      {% if ids is string %}
+                        {% set targets_player = ids == player_entity %}
+                      {% else %}
+                        {% set targets_player = player_entity in ids %}
+                      {% endif %}
+                      {{ targets_player
+                         and requested is number
+                         and elapsed_ms >= (processing_guard_ms_value | float(150)) }}
+                    {% endif %}
+              sequence:
+                - variables:
+                    cycle_absolute_seen: true
+                    cycle_absolute_target: >-
+                      {{ wait.trigger.event.data.service_data.volume_level | float }}
+
+            # Any actual player volume change after the guard is part of the
+            # command result. With no absolute call it represents a relative
+            # delta. After an absolute call it lets us capture rounding and any
+            # subsequent relative adjustment in the same processing turn.
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {% if wait.trigger is none
+                          or wait.trigger.id != 'player_volume_changed'
+                          or phase != 'processing' %}
+                      false
+                    {% else %}
+                      {% set old = wait.trigger.from_state.attributes.get('volume_level')
+                           if wait.trigger.from_state is not none else none %}
+                      {% set new = wait.trigger.to_state.attributes.get('volume_level')
+                           if wait.trigger.to_state is not none else none %}
+                      {% set elapsed_ms =
+                           (as_timestamp(now()) - processing_started_at | float(0)) * 1000 %}
+                      {{ old is number
+                         and new is number
+                         and ((new - old) | abs) > 0.0005
+                         and elapsed_ms >= (processing_guard_ms_value | float(150)) }}
+                    {% endif %}
+              sequence:
+                - variables:
+                    cycle_last_volume: >-
+                      {{ wait.trigger.to_state.attributes.get('volume_level') }}
+                    cycle_state_changed: true
+
+            # Leaving processing finalizes this turn's operation. This also
+            # supports follow-up turns within the same Assist interaction.
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {{ wait.trigger is not none
+                       and wait.trigger.id in
+                         ['satellite_listening', 'satellite_responding', 'satellite_idle'] }}
+              sequence:
+                # Save this before any nested wait, because a nested
+                # wait_for_trigger replaces the `wait` variable.
+                - variables:
+                    transition_id: "{{ wait.trigger.id }}"
+
+                - if:
+                    - condition: template
+                      value_template: "{{ phase == 'processing' }}"
+                  then:
+                    # Native relative volume handlers can finish before the
+                    # media player's new state is reported. If we reached
+                    # responding without seeing a relative state change, allow
+                    # a brief grace period for that update to arrive.
+                    - if:
+                        - condition: template
+                          value_template: >-
+                            {{ transition_id == 'satellite_responding'
+                               and (not cycle_absolute_seen)
+                               and (not cycle_state_changed)
+                               and (late_relative_grace_ms_value | int(400)) > 0 }}
+                      then:
+                        - wait_for_trigger:
+                            - trigger: state
+                              entity_id: !input media_player
+                              attribute: volume_level
+                              id: late_player_volume_changed
+                          timeout:
+                            milliseconds: >-
+                              {{ late_relative_grace_ms_value | int(400) }}
+                          continue_on_timeout: true
+
+                        - if:
+                            - condition: template
+                              value_template: >-
+                                {% if wait.trigger is none
+                                      or wait.trigger.id != 'late_player_volume_changed' %}
+                                  false
+                                {% else %}
+                                  {% set old = wait.trigger.from_state.attributes.get('volume_level')
+                                       if wait.trigger.from_state is not none else none %}
+                                  {% set new = wait.trigger.to_state.attributes.get('volume_level')
+                                       if wait.trigger.to_state is not none else none %}
+                                  {{ old is number
+                                     and new is number
+                                     and ((new - old) | abs) > 0.0005 }}
+                                {% endif %}
+                          then:
+                            - variables:
+                                cycle_last_volume: >-
+                                  {{ wait.trigger.to_state.attributes.get('volume_level') }}
+                                cycle_state_changed: true
+
+                    - choose:
+                        # An absolute command supersedes anything accumulated
+                        # before it. If the player has already reported the new
+                        # level, prefer that value so device rounding is kept.
+                        - conditions:
+                            - condition: template
+                              value_template: >-
+                                {{ cycle_absolute_seen
+                                   and (cycle_absolute_target is number
+                                        or cycle_state_changed) }}
+                          sequence:
+                            - variables:
+                                pending_type: "absolute"
+                                pending_value: >-
+                                  {% if cycle_state_changed
+                                        and cycle_last_volume is number %}
+                                    {{ cycle_last_volume | float }}
+                                  {% else %}
+                                    {{ cycle_absolute_target | float }}
+                                  {% endif %}
+
+                        # No absolute service call was seen, so use the actual
+                        # player delta as a relative command. Multiple follow-up
+                        # relative commands are accumulated. A relative command
+                        # after an absolute command adjusts that absolute target.
+                        - conditions:
+                            - condition: template
+                              value_template: >-
+                                {{ (not cycle_absolute_seen)
+                                   and cycle_state_changed
+                                   and cycle_baseline is number
+                                   and cycle_last_volume is number }}
+                          sequence:
+                            - variables:
+                                cycle_delta: >-
+                                  {{ (cycle_last_volume | float)
+                                     - (cycle_baseline | float) }}
+                            - variables:
+                                pending_value: >-
+                                  {% if pending_type in ['relative', 'absolute'] %}
+                                    {{ (pending_value | float) + (cycle_delta | float) }}
+                                  {% else %}
+                                    {{ cycle_delta | float }}
+                                  {% endif %}
+                                pending_type: >-
+                                  {{ 'absolute' if pending_type == 'absolute'
+                                     else 'relative' }}
+
+                - variables:
+                    phase: >-
+                      {% if transition_id == 'satellite_idle' %}
+                        idle
+                      {% elif transition_id == 'satellite_responding' %}
+                        responding
+                      {% else %}
+                        listening
+                      {% endif %}
+                    session_done: "{{ transition_id == 'satellite_idle' }}"
+
+  # If the loop timed out before idle, do not race Kiosk Satellite. Wait for
+  # the satellite to finish before applying anything.
+  - if:
+      - condition: template
+        value_template: "{{ pending_type != 'none' }}"
+    then:
+      - wait_template: "{{ is_state(satellite_entity, 'idle') }}"
+        timeout:
+          seconds: "{{ session_timeout_seconds_value | int(60) }}"
+        continue_on_timeout: false
+
+      # Kiosk Satellite restores its cached pre-Assist volume at the end of the
+      # voice interaction. Allow that restore (and the media player's state
+      # update) to finish before deriving a relative target or reapplying an
+      # absolute target.
+      - delay:
+          milliseconds: "{{ restore_delay_ms_value | int(750) }}"
+
+      - variables:
+          restored_volume: >-
+            {% set v = state_attr(player_entity, 'volume_level') %}
+            {{ v if v is number else none }}
+          final_volume: >-
+            {% if pending_type == 'absolute' %}
+              {{ [[pending_value | float(0), 0] | max, 1] | min }}
+            {% elif pending_type == 'relative' and restored_volume is number %}
+              {{ [[(restored_volume | float) + (pending_value | float(0)), 0] | max, 1] | min }}
+            {% else %}
+              {{ none }}
+            {% endif %}
+
+      - condition: template
+        value_template: "{{ final_volume is number }}"
+
+      - action: media_player.volume_set
+        target:
+          entity_id: !input media_player
+        data:
+          volume_level: "{{ final_volume }}"

@@ -1,46 +1,59 @@
 blueprint:
-  name: Kiosk Satellite - Persistent Voice Volume
+  name: Kiosk Satellite - Persistent Voice Volume (Multi Satellite / Multi Player)
   description: >-
-    Preserves voice-requested volume changes when Kiosk Satellite ducks an
-    external media player and later restores its pre-Assist volume.
+    Preserves voice-requested volume changes when Kiosk Satellite ducks one or
+    more external media players and later restores their pre-Assist volumes.
+
+    Select one or more Assist Satellite entities and one or more media players.
+    Any selected satellite can start an independent Assist session. During that
+    session, the blueprint watches all selected media players and tracks each
+    player's requested volume independently.
 
     The blueprint does not intercept conversation sentences or replace Assist
-    intents. It watches the selected media player's volume only while the
-    selected Assist Satellite is processing a request, remembers absolute or
-    relative volume changes, then reapplies the intended result after the
-    Assist session returns to idle.
+    intents. It therefore continues to support compound requests and LLM-based
+    Home Assistant control, as long as the requested volume change ultimately
+    reaches one of the selected media_player entities.
 
-    This allows compound requests and also works with LLM-controlled volume
-    changes as long as the LLM ultimately changes the selected Home Assistant
-    media_player.
+    Revision 3 adds multiple Assist Satellites and multiple media players while
+    preserving the Revision 2 fix: explicit media_player.volume_set calls are
+    captured immediately and are authoritative; the processing guard applies
+    only to raw player state changes.
   domain: automation
   homeassistant:
     min_version: 2024.6.0
+
   input:
     assist_satellite:
-      name: Assist satellite
-      description: The Kiosk Satellite assist_satellite entity for this room.
+      name: Assist satellite(s)
+      description: >-
+        Select every Kiosk Satellite that should use this set of managed media
+        players. Each satellite session is tracked independently.
       selector:
         entity:
+          multiple: true
           filter:
             - domain: assist_satellite
 
     media_player:
-      name: Media player
-      description: The external speaker/player that Kiosk Satellite ducks.
+      name: Media player(s)
+      description: >-
+        Select every external speaker/player whose Kiosk-ducked volume should
+        preserve voice-requested changes. Each player's volume is tracked and
+        restored independently.
       selector:
         entity:
+          multiple: true
           filter:
             - domain: media_player
 
     processing_guard_ms:
       name: Processing guard
       description: >-
-        Ignore player volume changes for this many milliseconds immediately
-        after the satellite enters processing. During this short window,
-        changes are treated as late-arriving ducking changes and update the
-        processing baseline instead. Set to 0 if very fast local volume
-        commands are being missed.
+        Ignore raw player STATE changes for this many milliseconds immediately
+        after the active satellite enters processing. During this short window,
+        state changes are treated as late-arriving ducking changes and update
+        that player's relative-volume baseline instead. Explicit
+        media_player.volume_set calls are never ignored by this guard.
       default: 150
       selector:
         number:
@@ -53,9 +66,8 @@ blueprint:
     late_relative_grace_ms:
       name: Late relative-volume grace
       description: >-
-        When processing ends before a relative volume change has appeared in
-        the media player's state, keep watching briefly while the satellite is
-        responding. This helps with media players whose volume state updates
+        When processing ends, wait this long before finalizing relative-volume
+        detection. This helps with media players whose state update arrives
         slightly after the native relative-volume handler returns.
       default: 400
       selector:
@@ -69,7 +81,8 @@ blueprint:
     session_timeout_seconds:
       name: Session timeout
       description: >-
-        Stop watching an interaction if no relevant event occurs for this long.
+        Stop waiting for relevant session events if the active satellite does
+        not progress for this long.
       default: 60
       selector:
         number:
@@ -82,9 +95,9 @@ blueprint:
     restore_delay_ms:
       name: Kiosk restore delay
       description: >-
-        Delay after the satellite returns to idle before calculating and
-        applying the final volume. Increase this if Kiosk Satellite restores
-        the old volume after this automation applies the requested volume.
+        Delay after the active satellite returns to idle before calculating and
+        applying final volumes. Increase this if Kiosk Satellite restores its
+        cached volume after this automation applies the requested volume.
       default: 750
       selector:
         number:
@@ -94,12 +107,20 @@ blueprint:
           unit_of_measurement: ms
           mode: slider
 
-mode: single
+# A new run begins only for idle -> listening, so follow-up listening turns in
+# the same conversation do not start duplicate runs. Parallel mode allows two
+# selected satellites to be used at the same time.
+mode: parallel
+max: 10
 max_exceeded: silent
 
 variables:
-  satellite_entity: !input assist_satellite
-  player_entity: !input media_player
+  satellite_input: !input assist_satellite
+  player_input: !input media_player
+  satellite_entities: >-
+    {{ satellite_input if satellite_input is list else [satellite_input] }}
+  player_entities: >-
+    {{ player_input if player_input is list else [player_input] }}
   processing_guard_ms_value: !input processing_guard_ms
   late_relative_grace_ms_value: !input late_relative_grace_ms
   session_timeout_seconds_value: !input session_timeout_seconds
@@ -108,31 +129,41 @@ variables:
 triggers:
   - trigger: state
     entity_id: !input assist_satellite
+    from: "idle"
     to: "listening"
 
 conditions: []
 
 actions:
-  # These variables live for this one Assist interaction. Because the
-  # automation is mode: single, follow-up listening turns do not start a
-  # second run and wipe the pending volume operation.
+  # This run belongs only to the satellite that triggered it. State changes
+  # from other selected satellites are ignored by the filters below.
   - variables:
+      active_satellite: "{{ trigger.entity_id }}"
       phase: "listening"
       processing_started_at: 0
-
-      # Per-processing-turn tracking.
-      cycle_baseline: null
-      cycle_last_volume: null
-      cycle_state_changed: false
-      cycle_absolute_seen: false
-      cycle_absolute_target: null
-
-      # Accumulated operation for the whole Assist interaction.
-      # pending_type is: none | relative | absolute
-      pending_type: "none"
-      pending_value: 0.0
-
       session_done: false
+
+      # Per-processing-turn dictionaries, keyed by media_player entity_id.
+      cycle_baselines: {}
+      cycle_last_volumes: {}
+      cycle_state_changed: {}
+      cycle_absolute_seen: {}
+      cycle_absolute_targets: {}
+
+      # Accumulated operation for the whole Assist interaction, keyed by
+      # media_player entity_id. Type is none | relative | absolute.
+      pending_types: >-
+        {% set ns = namespace(d={}) %}
+        {% for p in player_entities %}
+          {% set ns.d = dict(ns.d, **{p: 'none'}) %}
+        {% endfor %}
+        {{ ns.d }}
+      pending_values: >-
+        {% set ns = namespace(d={}) %}
+        {% for p in player_entities %}
+          {% set ns.d = dict(ns.d, **{p: 0.0}) %}
+        {% endfor %}
+        {{ ns.d }}
 
   - repeat:
       while:
@@ -140,6 +171,9 @@ actions:
           value_template: "{{ not session_done }}"
       sequence:
         - wait_for_trigger:
+            # We listen to all selected satellites here because trigger entity
+            # IDs cannot be templated. The choose branches below accept only
+            # events from this run's active_satellite.
             - trigger: state
               entity_id: !input assist_satellite
               to: "listening"
@@ -160,14 +194,14 @@ actions:
               to: "idle"
               id: satellite_idle
 
+            # Any selected player's volume can change during processing.
             - trigger: state
               entity_id: !input media_player
               attribute: volume_level
               id: player_volume_changed
 
-            # Absolute volume requests handled by HA/LLMs normally arrive as
-            # media_player.volume_set calls. The target is filtered below so
-            # volume changes in other rooms are ignored.
+            # Absolute requests handled by HA or an LLM commonly arrive as
+            # media_player.volume_set calls. We filter their targets below.
             - trigger: event
               event_type: call_service
               event_data:
@@ -188,30 +222,55 @@ actions:
                 - variables:
                     session_done: true
 
-            # A new processing turn begins. Capture the currently ducked
-            # volume as the relative-command baseline.
+            # A new processing turn begins for THIS satellite. Snapshot every
+            # selected player's currently ducked volume as its relative-command
+            # baseline and reset per-turn tracking.
             - conditions:
                 - condition: template
                   value_template: >-
                     {{ wait.trigger is not none
-                       and wait.trigger.id == 'satellite_processing' }}
+                       and wait.trigger.id == 'satellite_processing'
+                       and wait.trigger.entity_id == active_satellite }}
               sequence:
                 - variables:
                     phase: "processing"
                     processing_started_at: "{{ as_timestamp(now()) }}"
-                    cycle_baseline: >-
-                      {% set v = state_attr(player_entity, 'volume_level') %}
-                      {{ v if v is number else none }}
-                    cycle_last_volume: >-
-                      {% set v = state_attr(player_entity, 'volume_level') %}
-                      {{ v if v is number else none }}
-                    cycle_state_changed: false
-                    cycle_absolute_seen: false
-                    cycle_absolute_target: null
+                    cycle_baselines: >-
+                      {% set ns = namespace(d={}) %}
+                      {% for p in player_entities %}
+                        {% set v = state_attr(p, 'volume_level') %}
+                        {% set ns.d = dict(ns.d, **{p: (v if v is number else none)}) %}
+                      {% endfor %}
+                      {{ ns.d }}
+                    cycle_last_volumes: >-
+                      {% set ns = namespace(d={}) %}
+                      {% for p in player_entities %}
+                        {% set v = state_attr(p, 'volume_level') %}
+                        {% set ns.d = dict(ns.d, **{p: (v if v is number else none)}) %}
+                      {% endfor %}
+                      {{ ns.d }}
+                    cycle_state_changed: >-
+                      {% set ns = namespace(d={}) %}
+                      {% for p in player_entities %}
+                        {% set ns.d = dict(ns.d, **{p: false}) %}
+                      {% endfor %}
+                      {{ ns.d }}
+                    cycle_absolute_seen: >-
+                      {% set ns = namespace(d={}) %}
+                      {% for p in player_entities %}
+                        {% set ns.d = dict(ns.d, **{p: false}) %}
+                      {% endfor %}
+                      {{ ns.d }}
+                    cycle_absolute_targets: >-
+                      {% set ns = namespace(d={}) %}
+                      {% for p in player_entities %}
+                        {% set ns.d = dict(ns.d, **{p: none}) %}
+                      {% endfor %}
+                      {{ ns.d }}
 
-            # If a delayed ducking state update lands just after processing
-            # starts, absorb it into the baseline instead of treating it as a
-            # requested relative-volume change.
+            # A delayed ducking state update can land immediately after
+            # processing starts. Absorb that update into only the affected
+            # player's baseline instead of treating it as a relative command.
             - conditions:
                 - condition: template
                   value_template: >-
@@ -220,22 +279,30 @@ actions:
                           or phase != 'processing' %}
                       false
                     {% else %}
+                      {% set p = wait.trigger.entity_id %}
                       {% set new = wait.trigger.to_state.attributes.get('volume_level')
                            if wait.trigger.to_state is not none else none %}
                       {% set elapsed_ms =
                            (as_timestamp(now()) - processing_started_at | float(0)) * 1000 %}
-                      {{ new is number
+                      {{ p in player_entities
+                         and new is number
                          and elapsed_ms < (processing_guard_ms_value | float(150)) }}
                     {% endif %}
               sequence:
                 - variables:
-                    cycle_baseline: >-
+                    changed_player: "{{ wait.trigger.entity_id }}"
+                    changed_new_volume: >-
                       {{ wait.trigger.to_state.attributes.get('volume_level') }}
-                    cycle_last_volume: >-
-                      {{ wait.trigger.to_state.attributes.get('volume_level') }}
+                - variables:
+                    cycle_baselines: >-
+                      {{ dict(cycle_baselines, **{changed_player: changed_new_volume}) }}
+                    cycle_last_volumes: >-
+                      {{ dict(cycle_last_volumes, **{changed_player: changed_new_volume}) }}
 
-            # Absolute volume request: remember the requested target. The
-            # call_service event is emitted before the service is executed.
+            # Absolute volume request. Explicit volume_set is captured
+            # immediately; the processing guard NEVER suppresses it. If a
+            # single service call targets several selected players, each gets
+            # its own absolute pending target.
             - conditions:
                 - condition: template
                   value_template: >-
@@ -246,29 +313,53 @@ actions:
                     {% else %}
                       {% set e = wait.trigger.event.data %}
                       {% set sd = e.get('service_data', {}) %}
-                      {% set ids = sd.get('entity_id', []) %}
+                      {% set tgt = e.get('target', {}) or {} %}
+                      {% set raw_ids = sd.get('entity_id', tgt.get('entity_id', [])) %}
+                      {% set ids = [raw_ids] if raw_ids is string else (raw_ids or []) %}
                       {% set requested = sd.get('volume_level') %}
-                      {% set elapsed_ms =
-                           (as_timestamp(now()) - processing_started_at | float(0)) * 1000 %}
-                      {% if ids is string %}
-                        {% set targets_player = ids == player_entity %}
-                      {% else %}
-                        {% set targets_player = player_entity in ids %}
-                      {% endif %}
-                      {{ targets_player
-                         and requested is number
-                         and elapsed_ms >= (processing_guard_ms_value | float(150)) }}
+                      {% set ns = namespace(found=false) %}
+                      {% for p in player_entities %}
+                        {% if p in ids %}
+                          {% set ns.found = true %}
+                        {% endif %}
+                      {% endfor %}
+                      {{ ns.found and requested is number }}
                     {% endif %}
               sequence:
                 - variables:
-                    cycle_absolute_seen: true
-                    cycle_absolute_target: >-
-                      {{ wait.trigger.event.data.service_data.volume_level | float }}
+                    absolute_requested: >-
+                      {{ wait.trigger.event.data.get('service_data', {}).get('volume_level') | float }}
+                    absolute_target_players: >-
+                      {% set e = wait.trigger.event.data %}
+                      {% set sd = e.get('service_data', {}) %}
+                      {% set tgt = e.get('target', {}) or {} %}
+                      {% set raw_ids = sd.get('entity_id', tgt.get('entity_id', [])) %}
+                      {% set ids = [raw_ids] if raw_ids is string else (raw_ids or []) %}
+                      {% set ns = namespace(items=[]) %}
+                      {% for p in player_entities %}
+                        {% if p in ids %}
+                          {% set ns.items = ns.items + [p] %}
+                        {% endif %}
+                      {% endfor %}
+                      {{ ns.items }}
+                - variables:
+                    cycle_absolute_seen: >-
+                      {% set ns = namespace(d=cycle_absolute_seen) %}
+                      {% for p in absolute_target_players %}
+                        {% set ns.d = dict(ns.d, **{p: true}) %}
+                      {% endfor %}
+                      {{ ns.d }}
+                    cycle_absolute_targets: >-
+                      {% set ns = namespace(d=cycle_absolute_targets) %}
+                      {% for p in absolute_target_players %}
+                        {% set ns.d = dict(ns.d, **{p: absolute_requested}) %}
+                      {% endfor %}
+                      {{ ns.d }}
 
-            # Any actual player volume change after the guard is part of the
-            # command result. With no absolute call it represents a relative
-            # delta. After an absolute call it lets us capture rounding and any
-            # subsequent relative adjustment in the same processing turn.
+            # Raw volume change after the guard. Record only the affected
+            # player's latest volume. If no absolute call was seen for that
+            # player, finalization turns baseline -> latest into a relative
+            # delta. An absolute call always wins for that player.
             - conditions:
                 - condition: template
                   value_template: >-
@@ -277,34 +368,40 @@ actions:
                           or phase != 'processing' %}
                       false
                     {% else %}
+                      {% set p = wait.trigger.entity_id %}
                       {% set old = wait.trigger.from_state.attributes.get('volume_level')
                            if wait.trigger.from_state is not none else none %}
                       {% set new = wait.trigger.to_state.attributes.get('volume_level')
                            if wait.trigger.to_state is not none else none %}
                       {% set elapsed_ms =
                            (as_timestamp(now()) - processing_started_at | float(0)) * 1000 %}
-                      {{ old is number
+                      {{ p in player_entities
+                         and old is number
                          and new is number
                          and ((new - old) | abs) > 0.0005
                          and elapsed_ms >= (processing_guard_ms_value | float(150)) }}
                     {% endif %}
               sequence:
                 - variables:
-                    cycle_last_volume: >-
+                    changed_player: "{{ wait.trigger.entity_id }}"
+                    changed_new_volume: >-
                       {{ wait.trigger.to_state.attributes.get('volume_level') }}
-                    cycle_state_changed: true
+                - variables:
+                    cycle_last_volumes: >-
+                      {{ dict(cycle_last_volumes, **{changed_player: changed_new_volume}) }}
+                    cycle_state_changed: >-
+                      {{ dict(cycle_state_changed, **{changed_player: true}) }}
 
-            # Leaving processing finalizes this turn's operation. This also
-            # supports follow-up turns within the same Assist interaction.
+            # A state transition for this run's active satellite. If we are
+            # leaving processing, finalize every selected player's operation.
             - conditions:
                 - condition: template
                   value_template: >-
                     {{ wait.trigger is not none
                        and wait.trigger.id in
-                         ['satellite_listening', 'satellite_responding', 'satellite_idle'] }}
+                         ['satellite_listening', 'satellite_responding', 'satellite_idle']
+                       and wait.trigger.entity_id == active_satellite }}
               sequence:
-                # Save this before any nested wait, because a nested
-                # wait_for_trigger replaces the `wait` variable.
                 - variables:
                     transition_id: "{{ wait.trigger.id }}"
 
@@ -312,144 +409,173 @@ actions:
                     - condition: template
                       value_template: "{{ phase == 'processing' }}"
                   then:
-                    # Native relative volume handlers can finish before the
-                    # media player's new state is reported. If we reached
-                    # responding without seeing a relative state change, allow
-                    # a brief grace period for that update to arrive.
+                    # Give late relative state reports a brief opportunity to
+                    # land. We inspect all players after the grace period rather
+                    # than consuming just one state event, so several speakers
+                    # can update in the same turn.
                     - if:
                         - condition: template
                           value_template: >-
                             {{ transition_id == 'satellite_responding'
-                               and (not cycle_absolute_seen)
-                               and (not cycle_state_changed)
                                and (late_relative_grace_ms_value | int(400)) > 0 }}
                       then:
-                        - wait_for_trigger:
-                            - trigger: state
-                              entity_id: !input media_player
-                              attribute: volume_level
-                              id: late_player_volume_changed
-                          timeout:
+                        - delay:
                             milliseconds: >-
                               {{ late_relative_grace_ms_value | int(400) }}
-                          continue_on_timeout: true
 
-                        - if:
-                            - condition: template
-                              value_template: >-
-                                {% if wait.trigger is none
-                                      or wait.trigger.id != 'late_player_volume_changed' %}
-                                  false
-                                {% else %}
-                                  {% set old = wait.trigger.from_state.attributes.get('volume_level')
-                                       if wait.trigger.from_state is not none else none %}
-                                  {% set new = wait.trigger.to_state.attributes.get('volume_level')
-                                       if wait.trigger.to_state is not none else none %}
-                                  {{ old is number
-                                     and new is number
-                                     and ((new - old) | abs) > 0.0005 }}
+                        - variables:
+                            cycle_last_volumes: >-
+                              {% set ns = namespace(d=cycle_last_volumes) %}
+                              {% for p in player_entities %}
+                                {% set base = cycle_baselines.get(p) %}
+                                {% set current = state_attr(p, 'volume_level') %}
+                                {% if not cycle_absolute_seen.get(p, false)
+                                      and not cycle_state_changed.get(p, false)
+                                      and base is number
+                                      and current is number
+                                      and ((current - base) | abs) > 0.0005 %}
+                                  {% set ns.d = dict(ns.d, **{p: current}) %}
                                 {% endif %}
-                          then:
-                            - variables:
-                                cycle_last_volume: >-
-                                  {{ wait.trigger.to_state.attributes.get('volume_level') }}
-                                cycle_state_changed: true
+                              {% endfor %}
+                              {{ ns.d }}
+                            cycle_state_changed: >-
+                              {% set ns = namespace(d=cycle_state_changed) %}
+                              {% for p in player_entities %}
+                                {% set base = cycle_baselines.get(p) %}
+                                {% set current = state_attr(p, 'volume_level') %}
+                                {% if not cycle_absolute_seen.get(p, false)
+                                      and not cycle_state_changed.get(p, false)
+                                      and base is number
+                                      and current is number
+                                      and ((current - base) | abs) > 0.0005 %}
+                                  {% set ns.d = dict(ns.d, **{p: true}) %}
+                                {% endif %}
+                              {% endfor %}
+                              {{ ns.d }}
 
-                    - choose:
-                        # An absolute command supersedes anything accumulated
-                        # before it. If the player has already reported the new
-                        # level, prefer that value so device rounding is kept.
-                        - conditions:
-                            - condition: template
-                              value_template: >-
-                                {{ cycle_absolute_seen
-                                   and (cycle_absolute_target is number
-                                        or cycle_state_changed) }}
-                          sequence:
-                            - variables:
-                                pending_type: "absolute"
-                                pending_value: >-
-                                  {% if cycle_state_changed
-                                        and cycle_last_volume is number %}
-                                    {{ cycle_last_volume | float }}
-                                  {% else %}
-                                    {{ cycle_absolute_target | float }}
-                                  {% endif %}
+                    # Update pending numeric values first, while pending_types
+                    # still contains the previous-turn type for each player.
+                    - variables:
+                        pending_values: >-
+                          {% set ns = namespace(d=pending_values) %}
+                          {% for p in player_entities %}
+                            {% set abs_seen = cycle_absolute_seen.get(p, false) %}
+                            {% set abs_target = cycle_absolute_targets.get(p) %}
+                            {% set changed = cycle_state_changed.get(p, false) %}
+                            {% set base = cycle_baselines.get(p) %}
+                            {% set last = cycle_last_volumes.get(p) %}
+                            {% set old_type = pending_types.get(p, 'none') %}
+                            {% set old_value = pending_values.get(p, 0.0) | float(0) %}
+                            {% if abs_seen and abs_target is number %}
+                              {% set ns.d = dict(ns.d, **{p: (abs_target | float)}) %}
+                            {% elif (not abs_seen) and changed
+                                  and base is number and last is number %}
+                              {% set delta = (last | float) - (base | float) %}
+                              {% set next_value = old_value + delta
+                                   if old_type in ['relative', 'absolute'] else delta %}
+                              {% set ns.d = dict(ns.d, **{p: next_value}) %}
+                            {% endif %}
+                          {% endfor %}
+                          {{ ns.d }}
 
-                        # No absolute service call was seen, so use the actual
-                        # player delta as a relative command. Multiple follow-up
-                        # relative commands are accumulated. A relative command
-                        # after an absolute command adjusts that absolute target.
-                        - conditions:
-                            - condition: template
-                              value_template: >-
-                                {{ (not cycle_absolute_seen)
-                                   and cycle_state_changed
-                                   and cycle_baseline is number
-                                   and cycle_last_volume is number }}
-                          sequence:
-                            - variables:
-                                cycle_delta: >-
-                                  {{ (cycle_last_volume | float)
-                                     - (cycle_baseline | float) }}
-                            - variables:
-                                pending_value: >-
-                                  {% if pending_type in ['relative', 'absolute'] %}
-                                    {{ (pending_value | float) + (cycle_delta | float) }}
-                                  {% else %}
-                                    {{ cycle_delta | float }}
-                                  {% endif %}
-                                pending_type: >-
-                                  {{ 'absolute' if pending_type == 'absolute'
-                                     else 'relative' }}
+                    # Now update each player's pending operation type.
+                    - variables:
+                        pending_types: >-
+                          {% set ns = namespace(d=pending_types) %}
+                          {% for p in player_entities %}
+                            {% set abs_seen = cycle_absolute_seen.get(p, false) %}
+                            {% set abs_target = cycle_absolute_targets.get(p) %}
+                            {% set changed = cycle_state_changed.get(p, false) %}
+                            {% set base = cycle_baselines.get(p) %}
+                            {% set last = cycle_last_volumes.get(p) %}
+                            {% set old_type = pending_types.get(p, 'none') %}
+                            {% if abs_seen and abs_target is number %}
+                              {% set ns.d = dict(ns.d, **{p: 'absolute'}) %}
+                            {% elif (not abs_seen) and changed
+                                  and base is number and last is number %}
+                              {% set next_type = 'absolute'
+                                   if old_type == 'absolute' else 'relative' %}
+                              {% set ns.d = dict(ns.d, **{p: next_type}) %}
+                            {% endif %}
+                          {% endfor %}
+                          {{ ns.d }}
 
+                # A short late-relative grace can allow the satellite to move
+                # beyond the transition we originally caught, so use its actual
+                # current state after finalization.
                 - variables:
+                    active_satellite_state: "{{ states(active_satellite) }}"
                     phase: >-
-                      {% if transition_id == 'satellite_idle' %}
+                      {% set s = states(active_satellite) %}
+                      {% if s in ['idle', 'listening', 'processing', 'responding'] %}
+                        {{ s }}
+                      {% elif transition_id == 'satellite_idle' %}
                         idle
                       {% elif transition_id == 'satellite_responding' %}
                         responding
                       {% else %}
                         listening
                       {% endif %}
-                    session_done: "{{ transition_id == 'satellite_idle' }}"
+                    session_done: >-
+                      {{ is_state(active_satellite, 'idle')
+                         or transition_id == 'satellite_idle' }}
 
-  # If the loop timed out before idle, do not race Kiosk Satellite. Wait for
-  # the satellite to finish before applying anything.
+  # Determine whether any selected player actually has a pending operation.
+  - variables:
+      pending_players: >-
+        {% set ns = namespace(items=[]) %}
+        {% for p in player_entities %}
+          {% if pending_types.get(p, 'none') != 'none' %}
+            {% set ns.items = ns.items + [p] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.items }}
+
   - if:
       - condition: template
-        value_template: "{{ pending_type != 'none' }}"
+        value_template: "{{ pending_players | length > 0 }}"
     then:
-      - wait_template: "{{ is_state(satellite_entity, 'idle') }}"
+      # If the event loop timed out, do not race Kiosk Satellite. Wait until
+      # this run's active satellite has actually returned to idle.
+      - wait_template: "{{ is_state(active_satellite, 'idle') }}"
         timeout:
           seconds: "{{ session_timeout_seconds_value | int(60) }}"
         continue_on_timeout: false
 
-      # Kiosk Satellite restores its cached pre-Assist volume at the end of the
-      # voice interaction. Allow that restore (and the media player's state
-      # update) to finish before deriving a relative target or reapplying an
-      # absolute target.
+      # Let Kiosk restore every selected player's cached pre-Assist volume.
       - delay:
           milliseconds: "{{ restore_delay_ms_value | int(750) }}"
 
-      - variables:
-          restored_volume: >-
-            {% set v = state_attr(player_entity, 'volume_level') %}
-            {{ v if v is number else none }}
-          final_volume: >-
-            {% if pending_type == 'absolute' %}
-              {{ [[pending_value | float(0), 0] | max, 1] | min }}
-            {% elif pending_type == 'relative' and restored_volume is number %}
-              {{ [[(restored_volume | float) + (pending_value | float(0)), 0] | max, 1] | min }}
-            {% else %}
-              {{ none }}
-            {% endif %}
+      # Reapply each player's requested operation independently. Absolute
+      # requests set their exact target. Relative requests add the captured
+      # delta to that player's now-restored real volume.
+      - repeat:
+          for_each: "{{ pending_players }}"
+          sequence:
+            - variables:
+                replay_player: "{{ repeat.item }}"
+                replay_type: "{{ pending_types.get(repeat.item, 'none') }}"
+                replay_value: "{{ pending_values.get(repeat.item, 0.0) | float(0) }}"
+                restored_volume: >-
+                  {% set v = state_attr(repeat.item, 'volume_level') %}
+                  {{ v if v is number else none }}
 
-      - condition: template
-        value_template: "{{ final_volume is number }}"
+            - variables:
+                final_volume: >-
+                  {% if replay_type == 'absolute' %}
+                    {{ [[replay_value | float(0), 0] | max, 1] | min }}
+                  {% elif replay_type == 'relative' and restored_volume is number %}
+                    {{ [[(restored_volume | float) + (replay_value | float(0)), 0] | max, 1] | min }}
+                  {% else %}
+                    {{ none }}
+                  {% endif %}
 
-      - action: media_player.volume_set
-        target:
-          entity_id: !input media_player
-        data:
-          volume_level: "{{ final_volume }}"
+            - if:
+                - condition: template
+                  value_template: "{{ final_volume is number }}"
+              then:
+                - action: media_player.volume_set
+                  target:
+                    entity_id: "{{ replay_player }}"
+                  data:
+                    volume_level: "{{ final_volume }}"
